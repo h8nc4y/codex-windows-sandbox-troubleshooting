@@ -1,0 +1,315 @@
+# codex-windows-sandbox-troubleshooting
+
+[![Validate](https://github.com/h8nc4y/codex-windows-sandbox-troubleshooting/actions/workflows/validate.yml/badge.svg)](https://github.com/h8nc4y/codex-windows-sandbox-troubleshooting/actions/workflows/validate.yml)
+
+An agent skill for Codex on Windows (installable for Claude Code too):
+triage sandbox startup failures by the layer that fails — config load,
+sandbox setup helper, process creation, or the in-sandbox runtime — instead
+of guessing at ACLs and privileges. Covers `CreateProcessAsUserW failed: 5`
+on the agent execution path, Git Bash / MSYS2 `Win32 error 5`
+incompatibility, elevated setup-helper ACL failures, and the `config.toml`
+permission-token typo that bricks every session.
+
+## What It Solves
+
+Codex on Windows runs sandboxed commands as a dedicated local sandbox user.
+When that machinery fails, three unrelated failures all print Win32 error 5
+(ERROR_ACCESS_DENIED), and the obvious-looking fixes (ACL surgery, killing
+processes, switching to full access) range from useless to harmful. The
+skill documents, from field experience:
+
+- **The triage table**: which error string means which failing layer, and
+  why the failing API name — not the error number — locates the fault.
+- **Symptom (a)** — `windows sandbox: runner error: CreateProcessAsUserW
+  failed: 5` only when Codex runs via `codex mcp-server`: the one-command
+  bisect (`codex sandbox` CLI vs the agent path) that clears the backend,
+  ACLs, privileges, and modes all at once, plus a preserved worked example
+  of a plausible-but-wrong contention hypothesis and the measurements that
+  refuted it.
+- **Symptom (b)** — Git Bash / MSYS2 failing only inside the sandbox
+  (`CreateFileMapping ... Win32 error 5`, `couldn't create signal pipe`):
+  a sandbox↔MSYS2-runtime incompatibility, the PowerShell fallback, the
+  WSL-shim PATH trap, and the upstream issue references.
+- **Symptom (c)** — the `elevated` backend's setup helper failing ACL
+  preparation (`SetNamedSecurityInfoW failed: 5`): why full access is not a
+  repair, and the field-verified least-privilege recovery combination.
+- **Symptom (d)** — `config.toml` filesystem permission tokens are exactly
+  `read` / `write` / `deny`; an invalid token (such as `read-write`) fails
+  the whole config parse with `data did not match any variant of untagged
+  enum FilesystemPermissionToml` and bricks every session. Backup and
+  post-edit load checks are the discipline.
+- **Symptom (e)** — writing outside the workspace needs three independent
+  conditions (config grant, OS ACL, healthy runner); why that stack is
+  fragile and what to do instead.
+
+## Who It Is For
+
+- Anyone running Codex on Windows whose sandbox suddenly refuses to start
+  commands, or who is about to edit `config.toml` permissions.
+- Agents (Codex, Claude Code, or others) that drive Codex through
+  `codex mcp-server` and hit agent-path-only failures.
+- Anyone deciding whether a sandbox error justifies weakening the sandbox —
+  the skill's answer is a least-privilege path for each layer.
+
+## Install
+
+Clone the repository:
+
+```bash
+git clone https://github.com/h8nc4y/codex-windows-sandbox-troubleshooting.git
+cd codex-windows-sandbox-troubleshooting
+```
+
+### Codex (agent skills)
+
+Manual Codex-style skill install on shells with POSIX syntax:
+
+```bash
+dest="${HOME}/.agents/skills/codex-windows-sandbox-troubleshooting"
+if [ -e "$dest" ]; then
+  echo "Install target already exists: $dest"
+else
+  mkdir -p "$dest"
+  cp SKILL.md "$dest/SKILL.md"
+fi
+```
+
+Manual Codex-style skill install from PowerShell:
+
+```powershell
+$dest = Join-Path $HOME '.agents\skills\codex-windows-sandbox-troubleshooting'
+if (Test-Path -LiteralPath $dest) {
+  throw "Install target already exists: $dest"
+}
+New-Item -ItemType Directory -Path $dest | Out-Null
+Copy-Item -LiteralPath .\SKILL.md -Destination (Join-Path $dest 'SKILL.md')
+```
+
+To scope the skill to a single project instead, copy `SKILL.md` to
+`.agents/skills/codex-windows-sandbox-troubleshooting/SKILL.md` inside that
+repository — Codex scans `.agents/skills` from the working directory up to
+the repository root (per the official skills documentation).
+
+### Claude Code
+
+Claude Code auto-invokes the skill when a task matches the `description`
+frontmatter. Install for your user account on shells with POSIX syntax:
+
+```bash
+dest="${HOME}/.claude/skills/codex-windows-sandbox-troubleshooting"
+if [ -e "$dest" ]; then
+  echo "Install target already exists: $dest"
+else
+  mkdir -p "$dest"
+  cp SKILL.md "$dest/SKILL.md"
+fi
+```
+
+Install for your user account from PowerShell:
+
+```powershell
+$dest = Join-Path $HOME '.claude\skills\codex-windows-sandbox-troubleshooting'
+if (Test-Path -LiteralPath $dest) {
+  throw "Install target already exists: $dest"
+}
+New-Item -ItemType Directory -Path $dest | Out-Null
+Copy-Item -LiteralPath .\SKILL.md -Destination (Join-Path $dest 'SKILL.md')
+```
+
+Notes:
+
+- If you set `CLAUDE_CONFIG_DIR`, replace `~/.claude` with that directory.
+- To scope the skill to a single project instead, copy `SKILL.md` to
+  `.claude/skills/codex-windows-sandbox-troubleshooting/SKILL.md` inside
+  that project's repository.
+
+The existence guard is intentional: do not overwrite an already-installed
+skill without reviewing the local copy first.
+
+If your agent reads skills from a different directory, check its
+documentation and copy `SKILL.md` into the matching
+`skills/codex-windows-sandbox-troubleshooting/` folder.
+
+## Manual Use
+
+Reach for the skill when you see one of these:
+
+- `windows sandbox: runner error: CreateProcessAsUserW failed: 5` — often
+  only when Codex runs via `codex mcp-server`, while direct CLI use works.
+- Git Bash / MSYS2 commands fail only inside the sandbox with
+  `CreateFileMapping ... Win32 error 5` or `couldn't create signal pipe`.
+- The `elevated` backend stops even `cmd /c echo` before launch, with
+  `SetNamedSecurityInfoW failed: 5` in the sandbox setup log.
+- Every Codex session fails to start after a `config.toml` edit, with
+  `data did not match any variant of untagged enum
+  FilesystemPermissionToml`.
+- A path outside the workspace stays read-only although `config.toml`
+  grants `write` on it.
+
+Then follow [SKILL.md](SKILL.md): find your error in the triage table,
+jump to that symptom's section, and apply its layer-specific diagnosis —
+starting with the `codex sandbox` CLI bisect where process creation is
+involved.
+
+## Synthetic Examples
+
+- [Layer triage checklist](examples/layer-triage-checklist.md) — the
+  one-page symptom-to-layer table with an ordered check sequence.
+- [CLI bisect commands](examples/cli-bisect-commands.md) — the decisive
+  `codex sandbox` bisect with interpretation, plus read-only diagnostics.
+- [config.toml permissions](examples/config-toml-permissions.md) — valid
+  permission tokens, the brick-and-recover walkthrough, and the safe
+  editing procedure.
+
+The examples use placeholders only. Do not replace them with secrets, real
+repository paths you cannot publish, or customer data in public issues.
+
+## Upstream Issues Referenced
+
+- Agent-path spawn failures (config comments for `[windows]
+  sandbox = "elevated"` reference this family):
+  [openai/codex#26737](https://github.com/openai/codex/issues/26737),
+  [openai/codex#26803](https://github.com/openai/codex/issues/26803)
+- Git Bash / MSYS2 inside the Windows sandbox:
+  [openai/codex#7031](https://github.com/openai/codex/issues/7031),
+  [openai/codex#12000](https://github.com/openai/codex/issues/12000),
+  [openai/codex#15016](https://github.com/openai/codex/issues/15016)
+- Permissions documentation:
+  <https://developers.openai.com/codex/permissions>
+
+Issue states change; check them before assuming a behavior still holds.
+
+## 日本語概要 (Japanese Overview)
+
+Windows 上の Codex サンドボックスが起動できない・書けないとき、「どの層が
+失敗しているか」で切り分けるトラブルシュート集です。config ロード → setup
+helper → プロセス生成 → サンドボックス内 runtime の順に見ます。
+
+- 症状 (a): `codex mcp-server` 経由（エージェント実行経路）でのみ
+  `CreateProcessAsUserW failed: 5` — 最短の切り分けは `codex sandbox` CLI
+  直接実行との二分。CLI が通れば backend・ACL・特権はすべて健全で、原因は
+  エージェント経路に限定できます。「多セッション競合説」を実測で棄却した
+  経緯を worked example として収録。
+- 症状 (b): Git Bash / MSYS2 がサンドボックス内でのみ `Win32 error 5` —
+  sandbox と MSYS2 runtime の非互換。通常コマンドは PowerShell を使い、
+  `bash` 名は WSL shim に解決されるため Git Bash は絶対パスで呼ぶ。
+- 症状 (c): `elevated` の setup helper が ACL 準備段で
+  `SetNamedSecurityInfoW failed: 5` — full access への切替は同じ ACL 処理で
+  失敗するため修復手段とみなさない。実測済みの復旧は `:workspace` +
+  `unelevated` の組合せ。
+- 症状 (d): config.toml の filesystem 権限トークンは `read` / `write` /
+  `deny` の3つだけ。`read-write` 等の無効値は config 全体をロード不能にし、
+  全セッションが起動不能（ブリック）。編集前バックアップ・編集後ロード確認
+  が必須。
+- 症状 (e): workspace 外への書込みは (1) config の write 許可 (2) OS ACL
+  (3) runner logon の健全性、の3条件がすべて要る。
+
+この skill はサンドボックスの回避・無効化を推奨しません。原則は最小権限へ
+倒すこと（PowerShell fallback、コマンド単位のエスカレーション、狭い権限、
+版数を記録した一時回避と上流修正後の再検証）です。
+
+日本語の完全版は [docs/SKILL.ja.md](docs/SKILL.ja.md) にあります。
+インストールは上記の手順どおり、`SKILL.md` を Codex なら
+`~/.agents/skills/codex-windows-sandbox-troubleshooting/` へ、Claude Code
+なら `~/.claude/skills/codex-windows-sandbox-troubleshooting/` へコピー
+してください。
+
+## Safety Notes
+
+- This skill never recommends bypassing or disabling the sandbox as a fix.
+  `danger-full-access` appears only as a temporary avoidance strictly
+  limited to trusted local work, version-recorded, and retired on the next
+  release; full access is explicitly **not** a repair for the setup-helper
+  failure (it fails the same way).
+- Recoveries move toward least privilege: PowerShell fallback,
+  per-command escalation, narrow profile grants, `:workspace` presets.
+- Never kill other sessions' processes, shared runners, or the sandbox
+  user's logon sessions to "free" a stuck runner.
+- ACL changes on shared resources (the `icacls` grant in symptom (e))
+  require the resource owner's approval.
+- Never paste tokens, credentials, private logs, hostnames, usernames, or
+  customer data into public issues.
+
+## Limitations
+
+- Everything is field-observed on Codex CLI 0.142.5-era builds (as of July
+  2026). Sandbox internals change between versions; retest before applying
+  any workaround on a newer Codex, and expect some symptoms to be fixed
+  upstream over time.
+- The failures require an already-broken environment to reproduce, so this
+  repository's CI cannot reproduce them. CI validates document structure
+  and scans for private markers; the commands are syntax-checked and
+  marked field-observed rather than CI-reproduced.
+- The exact sandbox user/group naming, log locations, and config keys may
+  vary by Codex version and install channel.
+
+## Non-Goals
+
+- No automation that "fixes" your sandbox for you. This repository is a
+  written triage discipline with copy-adaptable commands, not a tool.
+- No general Codex configuration tutorial; the focus is startup failures
+  and the permission model around them.
+- No sandbox-hardening or sandbox-escape research; this is operational
+  troubleshooting for legitimate local development.
+
+## Validation
+
+Run the full local validation from the repository root:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\validate-oss-readiness.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-scan-private-markers.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\scan-private-markers.ps1
+```
+
+If `pwsh` is available, the same checks can be run with:
+
+```powershell
+pwsh -NoProfile -File .\scripts\validate-oss-readiness.ps1
+pwsh -NoProfile -File .\scripts\test-scan-private-markers.ps1
+pwsh -NoProfile -File .\scripts\scan-private-markers.ps1
+```
+
+On macOS, Linux, or any POSIX shell with PowerShell 7 (`pwsh`) installed:
+
+```bash
+pwsh -NoProfile -File ./scripts/validate-oss-readiness.ps1
+pwsh -NoProfile -File ./scripts/test-scan-private-markers.ps1
+pwsh -NoProfile -File ./scripts/scan-private-markers.ps1
+```
+
+Also run Git whitespace checks on your working changes before publishing:
+
+```bash
+git diff --check
+```
+
+The GitHub Actions workflow runs the same validation, scan self-test,
+private-marker scan, and whitespace check on pull requests and pushes to
+`main`.
+
+## Contributing
+
+Contributions are welcome when they make the triage sharper, the recovery
+safer, or a claim better grounded. Read [CONTRIBUTING.md](CONTRIBUTING.md)
+before opening a pull request.
+
+Keep all examples synthetic. Do not include tokens, credentials, private
+repository names, hostnames, usernames, internal absolute paths, or
+customer data.
+
+For local-only private markers, create an untracked
+`.private-markers.local` file with one literal marker per line, or set
+`CODEX_WINDOWS_SANDBOX_TROUBLESHOOTING_PRIVATE_MARKERS` with
+newline-separated markers. The scanner reads these values but does not
+print the matched marker.
+
+## Security
+
+If you find unsafe guidance (for example, advice that would weaken the
+sandbox more than documented) or accidental private-data exposure, follow
+[SECURITY.md](SECURITY.md) and use private reporting for sensitive details.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

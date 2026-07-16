@@ -1,0 +1,76 @@
+name: Bug report
+description: Report a sanitized problem with the skill or examples.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Do not paste tokens, credentials, raw agent transcripts with private data, private repository names, hostnames, usernames, or internal absolute paths.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the observable problem without private data.
+      placeholder: Following the triage table, my error landed in symptom (a), but the CLI bisect result contradicts the skill because...
+    validations:
+      required: true
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: Symptom class
+      options:
+        - Config bricked (FilesystemPermissionToml parse failure)
+        - Elevated setup helper ACL failure (SetNamedSecurityInfoW failed 5)
+        - CreateProcessAsUserW failed 5 on the agent execution path
+        - Git Bash / MSYS2 Win32 error 5 inside the sandbox
+        - Write denied outside the workspace (three-condition stack)
+        - Triage table gap (my error fits no layer)
+        - Guidance weakens the sandbox more than necessary (safety posture)
+        - Version drift (behavior changed in a newer Codex)
+        - Documentation error or unclear guidance
+        - Other sanitized symptom
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Codex version observed
+      description: The skill's claims are version-scoped; reports need the version too.
+      placeholder: codex-cli 0.142.5
+    validations:
+      required: true
+  - type: textarea
+    id: sanitized-checks
+    attributes:
+      label: Sanitized checks performed
+      description: Summarize safe facts only. Use placeholder host, path, and profile names.
+      placeholder: |
+        codex sandbox CLI bisect result: succeeded
+        Agent path (codex mcp-server) result: CreateProcessAsUserW failed: 5
+        Sandbox backend: elevated / unelevated
+        Config parses after edit: yes
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: Per the triage table, a passing CLI bisect should isolate the fault to the agent execution path.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      placeholder: Both paths fail, but with different errors than the table lists.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I removed tokens, credentials, customer data, private repository names, hostnames, usernames, and internal absolute paths.
+          required: true
