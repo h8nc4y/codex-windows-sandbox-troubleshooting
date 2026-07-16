@@ -219,12 +219,21 @@ foreach ($file in $files) {
                 $matched = [regex]::IsMatch($line, $rule.Pattern, 'IgnoreCase')
             } else {
                 # For allowlisted regex rules, inspect each match and suppress the
-                # finding only when every match is a known-safe placeholder.
-                foreach ($m in [regex]::Matches($line, $rule.Pattern, 'IgnoreCase')) {
+                # finding only when every match is a known-safe placeholder. After
+                # a suppressed match, resume scanning just past the match START,
+                # not past its end: an allowlisted match that tolerates trailing
+                # prose must not swallow a later private-looking value on the
+                # same line (covered by the winpath-two-paths self-test).
+                $allowlistedRegex = [regex]::new($rule.Pattern, 'IgnoreCase')
+                $searchIndex = 0
+                while ($searchIndex -le $line.Length) {
+                    $m = $allowlistedRegex.Match($line, $searchIndex)
+                    if (-not $m.Success) { break }
                     if (-not [regex]::IsMatch($m.Value, $rule.Allowlist)) {
                         $matched = $true
                         break
                     }
+                    $searchIndex = $m.Index + 1
                 }
             }
 

@@ -33,8 +33,8 @@ Consequences (field-observed):
 
 - **Every** Codex session on the machine fails to start, not just the
   edited profile. The blast radius is total.
-- The error names the enum, not the file line, so you will not get a
-  pointer to the offending entry.
+- The observed error output named only the enum — it did not point at the
+  offending entry.
 
 ## Safe Editing Procedure
 
@@ -61,7 +61,7 @@ Consequences (field-observed):
 
 2. No backup? Re-open the config and re-check the **most recent edit**
    for a non-token value (`read-write`, `rw`, `readonly`, quotes missing,
-   etc.) — the parse error will not point at the line.
+   etc.) — the observed parse error did not point at the line.
 3. Load-check again before doing anything else.
 
 ## Reminder: A Write Grant Alone Is Not Enough Outside The Workspace

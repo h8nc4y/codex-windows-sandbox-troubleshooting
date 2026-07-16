@@ -25,7 +25,7 @@ codex sandbox -P <profile> -C <dir> -- cmd /c echo x
 | Direct CLI | Agent path (`codex mcp-server`) | Conclusion |
 | --- | --- | --- |
 | succeeds | fails with `CreateProcessAsUserW failed: 5` | Sandbox backend, sandbox user, workspace ACLs, window-station/desktop ACLs, privileges, and modes are **all healthy**. The fault is isolated to the agent execution path. Stop auditing ACLs; treat as an upstream agent-path defect, apply the scoped workaround only if needed, retest on the next Codex version. |
-| fails | fails | The problem is below the agent path. Walk the triage layers instead: config load (d), setup helper (c), write authorization (e). |
+| fails | fails | The problem is below the agent path. Walk the triage layers instead: config load (d) or setup helper (c); if neither matches, the spawn environment is broken on both paths — workspace-ACL and sandbox-user diagnostics are back on the table. |
 | succeeds | succeeds | No symptom (a). If something else is wrong, start from the triage table. |
 
 Worth one paragraph of respect: in the originating field case, a

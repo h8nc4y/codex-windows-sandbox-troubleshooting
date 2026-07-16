@@ -62,7 +62,8 @@ cd codex-windows-sandbox-troubleshooting
 
 ### Codex (agent skills)
 
-Manual Codex-style skill install on shells with POSIX syntax:
+Codex reads user-scope skills from `~/.agents/skills` (per the official
+skills documentation). Manual install on shells with POSIX syntax:
 
 ```bash
 dest="${HOME}/.agents/skills/codex-windows-sandbox-troubleshooting"
@@ -166,8 +167,8 @@ repository paths you cannot publish, or customer data in public issues.
 
 ## Upstream Issues Referenced
 
-- Agent-path spawn failures (config comments for `[windows]
-  sandbox = "elevated"` reference this family):
+- Agent-path spawn failures (config comments observed alongside
+  `[windows] sandbox = "elevated"` reference this family):
   [openai/codex#26737](https://github.com/openai/codex/issues/26737),
   [openai/codex#26803](https://github.com/openai/codex/issues/26803)
 - Git Bash / MSYS2 inside the Windows sandbox:
@@ -202,7 +203,8 @@ helper → プロセス生成 → サンドボックス内 runtime の順に見�
   全セッションが起動不能（ブリック）。編集前バックアップ・編集後ロード確認
   が必須。
 - 症状 (e): workspace 外への書込みは (1) config の write 許可 (2) OS ACL
-  (3) runner logon の健全性、の3条件がすべて要る。
+  (3) runner の健全性（サンドボックスユーザーとしてのプロセス生成が通る
+  こと）、の3条件がすべて要る。
 
 この skill はサンドボックスの回避・無効化を推奨しません。原則は最小権限へ
 倒すこと（PowerShell fallback、コマンド単位のエスカレーション、狭い権限、

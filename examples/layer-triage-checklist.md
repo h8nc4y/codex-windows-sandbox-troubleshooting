@@ -53,8 +53,9 @@ failing **API name** locates the layer; the number does not.
 - CLI succeeds, agent path (`codex mcp-server`) fails → the fault is the
   agent execution path; stop auditing ACLs. See
   [cli-bisect-commands.md](cli-bisect-commands.md).
-- CLI also fails → go back up this list (config, setup helper, write
-  stack).
+- CLI also fails → go back up this list (config load, setup helper); if
+  neither matches, the spawn environment is broken on both paths and
+  workspace-ACL / sandbox-user diagnostics are back on the table.
 
 ### Step 3 — Does the spawned program initialize?
 

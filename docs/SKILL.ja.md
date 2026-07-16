@@ -72,9 +72,9 @@ runtime。
 何が起きるか: Codex を `codex mcp-server` 経由（例: MCP クライアントや別の
 エージェントから駆動する場合）で動かすと、**すべての**コマンドが
 `windows sandbox: runner error: CreateProcessAsUserW failed: 5` で失敗
-します — 単純な `echo` も、シェル経由のファイル読取もです。同じマシンの
-同じ Codex を対話 / CLI 直接で使う分には同時刻でも正常、ということが
-あり得ます。
+します — 単純な `echo` も、シェル経由のファイル読取もです。同じ Codex の
+`codex sandbox` CLI 直接実行は同時刻でも成功し得ます — その対比こそが
+下の二分法です。
 
 ### 決定的な二分法: `codex sandbox` CLI vs エージェント経路
 
@@ -94,8 +94,9 @@ codex sandbox -P <profile> -C <dir> -- cmd /c echo x
   切り、上流のエージェント経路の不具合として扱い（下記の回避策参照）、
   新しい版で再検証します。
 - **CLI も失敗する** → 問題はエージェント経路より下にあります。層の表に
-  沿って、config ロード (d)、setup helper (c)、書込み認可スタック (e) を
-  順に見ます。
+  沿って config ロード (d)、setup helper (c) を見ます — どちらにも該当
+  しなければ、spawn 環境そのものが両経路で壊れており、workspace ACL と
+  サンドボックスユーザーの診断が改めて俎上に載ります。
 
 この二分法は、ACL・特権の実験を連ねるより多くのことを1コマンドで確定
 させます。原因についてどんなもっともらしい説を信じるより先に、まずこれを
@@ -131,9 +132,9 @@ codex sandbox -P <profile> -C <dir> -- cmd /c echo x
   （パスワード不一致）でも 1314（特権欠如）でもない。バイナリ内の文字列に
   `failed to lock ConPTY handle` があり、エージェント経路は直接 CLI が
   通らない ConPTY/tty + restricted-token spawn を使います — 不具合はその
-  経路にあります。`[windows] sandbox = "elevated"` に付属する config
-  コメントも同じ既知 issue 系（openai/codex#26737、openai/codex#26803）を
-  参照しています。
+  経路にあります。`[windows] sandbox = "elevated"` とともに観測された
+  config コメントも同じ既知 issue 系（openai/codex#26737、
+  openai/codex#26803）を参照しています。
 
 教訓: 並行セッションとの相関は偶然でした。決定的な二分法1つは、もっとも
 らしい原因を順に潰していく作業に勝ります — しかも一番安い実験です。
@@ -286,8 +287,8 @@ data did not match any variant of untagged enum FilesystemPermissionToml
 ```
 
 そして修正するまで**マシン上の全 Codex セッションが起動不能**（ブリック）
-になります。爆風は全域に及び、エラーは enum 名を言うだけで、問題の行を
-指しません。
+になります。爆風は全域に及び、観測したエラー出力は enum 名を言うだけで、
+問題の行を指しませんでした。
 
 安全な編集手順:
 
@@ -297,7 +298,7 @@ data did not match any variant of untagged enum FilesystemPermissionToml
    最小 CLI コマンドを実行する）ことで、config がパースされることを確認
    する。まとめて編集して放置しないこと。
 4. ブリックしてしまったら: バックアップを復元するか、直近の編集から無効
-   トークンを探す — パースエラーは行を教えてくれません。
+   トークンを探す — 観測したパースエラーは行を教えてくれませんでした。
 
 参照: 公式の permissions ドキュメント
 https://developers.openai.com/codex/permissions

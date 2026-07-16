@@ -164,6 +164,25 @@ Plain bash resolves to C:\Windows\System32\bash.exe (the WSL shim) instead.
         Add-Failure "Expected well-known system path doc to pass, but scanner exited $($winPathSystemResult.ExitCode): $($winPathSystemResult.Output.Trim())"
     }
 
+    # windows-absolute-path: an allowlisted match that tolerates trailing prose
+    # must not swallow a later private-looking path on the same line. Split the
+    # second drive designators so this test file does not flag itself.
+    $winPathTwoRoot = Join-Path $tempRoot 'winpath-two-paths'
+    New-Item -ItemType Directory -Path $winPathTwoRoot | Out-Null
+    $secondPath = 'E' + ':\CorpShare\Internal\notes.md'
+    $thirdPath = 'E' + ':\Internal\Repo\file'
+    Set-Content -LiteralPath (Join-Path $winPathTwoRoot 'doc.md') -Value @(
+        "Copy from C:\path\to\repo to $secondPath now.",
+        "C:\Program Files\Git\bin\bash.exe -lc then check $thirdPath"
+    ) -Encoding UTF8
+    $winPathTwoResult = Invoke-Scanner -ScanPath $winPathTwoRoot
+    if ($winPathTwoResult.ExitCode -eq 0) {
+        Add-Failure 'Expected same-line second-path fixture to fail, but scanner exited 0.'
+    }
+    if ($winPathTwoResult.Output -notmatch 'windows-absolute-path') {
+        Add-Failure "Expected same-line second-path output to name windows-absolute-path. Output: $($winPathTwoResult.Output.Trim())"
+    }
+
     # GitHub URL allowlist: this repository and openai/codex citations pass.
     $urlAllowedRoot = Join-Path $tempRoot 'url-allowed'
     New-Item -ItemType Directory -Path $urlAllowedRoot | Out-Null

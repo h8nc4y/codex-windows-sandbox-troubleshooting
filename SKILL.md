@@ -85,8 +85,9 @@ not identify the layer. The failing **API name** does:
 What it looks like: when Codex runs via `codex mcp-server` (for example,
 driven by an MCP client or another agent), **every** command fails with
 `windows sandbox: runner error: CreateProcessAsUserW failed: 5` — even a
-trivial `echo`, even shell-based file reads. Interactive or direct CLI use
-of the same Codex install may be fine at the same time.
+trivial `echo`, even shell-based file reads. Direct `codex sandbox` CLI
+invocations of the same install can succeed at the same time — that
+contrast is exactly the bisect below.
 
 ### The Decisive Bisect: `codex sandbox` CLI vs The Agent Path
 
@@ -105,8 +106,10 @@ Interpretation:
   (`codex mcp-server` / exec). Stop auditing ACLs; treat it as an upstream
   agent-path defect (see the workaround below) and retest on later versions.
 - **CLI also fails** → the problem is below the agent path. Work up the
-  layer table instead: config load (d), setup helper (c), or the write
-  authorization stack (e).
+  layer table instead: config load (d) or the setup helper (c) — and if
+  neither matches, the spawn environment is genuinely broken on both
+  paths, which puts workspace-ACL and sandbox-user diagnostics back on
+  the table.
 
 This bisect settles more in one command than a chain of ACL and privilege
 experiments — run it before believing any richer story about the cause.
@@ -142,7 +145,7 @@ enough to preserve (field-observed, as of July 2026):
   (bad password), not 1314 (missing privilege). Binary strings include
   `failed to lock ConPTY handle`; the agent path uses a ConPTY/tty plus
   restricted-token spawn that the direct CLI does not exercise — the defect
-  lives in that path. The shipped config comments for `[windows]
+  lives in that path. The config comments observed alongside `[windows]
   sandbox = "elevated"` reference the same known issue family
   (openai/codex#26737, openai/codex#26803).
 
@@ -210,9 +213,9 @@ not fix it.
 
 The WSL shim trap, distinct from the above: invoking plain `bash` resolves
 through PATH to `C:\Windows\System32\bash.exe` — the WSL shim, not Git
-Bash — which fails differently (`Bash/Service/CreateInstance/
-E_ACCESSDENIED`). Always call Git Bash by absolute path so you know which
-failure you are even looking at.
+Bash — which fails differently with
+`Bash/Service/CreateInstance/E_ACCESSDENIED`. Always call Git Bash by
+absolute path so you know which failure you are even looking at.
 
 Practical rules:
 
@@ -297,8 +300,8 @@ data did not match any variant of untagged enum FilesystemPermissionToml
 ```
 
 and **every Codex session on the machine fails to start** (bricked) until
-the file is fixed. The blast radius is total, and the error names the enum,
-not the offending line.
+the file is fixed. The blast radius is total, and the observed error output
+named only the enum — it did not point at the offending line.
 
 Safe editing procedure:
 
@@ -308,7 +311,8 @@ Safe editing procedure:
    command that loads the config) and confirm the config parses. Never
    batch-edit and walk away.
 4. If you are bricked: restore the backup, or re-check the most recent edit
-   for an invalid token — the parse error will not point at the line.
+   for an invalid token — the observed parse error did not point at the
+   line.
 
 Reference: the official permissions documentation at
 https://developers.openai.com/codex/permissions
