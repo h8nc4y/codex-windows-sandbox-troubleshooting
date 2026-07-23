@@ -56,6 +56,115 @@ function Assert-FileContains {
     }
 }
 
+function Test-ContainsMixedPermissionConfigFence {
+    param([string[]]$Lines)
+
+    # Permission profiles and the legacy sandbox settings are separate
+    # configuration systems. Walk Markdown fences so a future copy-paste
+    # example cannot make the selected permission profile ineffective.
+    $insideFence = $false
+    $fenceCharacter = ''
+    $fenceLength = 0
+    $fenceLines = New-Object System.Collections.Generic.List[string]
+
+    foreach ($line in $Lines) {
+        if (-not $insideFence) {
+            if ($line -match '^ {0,3}(`{3,}|~{3,})(.*)$') {
+                $insideFence = $true
+                $fenceCharacter = $Matches[1].Substring(0, 1)
+                $fenceLength = $Matches[1].Length
+                $fenceLines.Clear()
+            }
+            continue
+        }
+
+        if ($line -match '^ {0,3}(`{3,}|~{3,})(.*)$' -and
+            $Matches[1].Substring(0, 1) -eq $fenceCharacter -and
+            $Matches[1].Length -ge $fenceLength -and
+            [string]::IsNullOrWhiteSpace($Matches[2])) {
+            $fenceText = $fenceLines -join "`n"
+            $hasLegacySettings = (
+                $fenceText -match '(?m)^\s*sandbox_mode\s*=' -or
+                $fenceText -match '(?m)^\s*\[sandbox_workspace_write(?:\.|\])'
+            )
+            $hasPermissionProfile = (
+                $fenceText -match '(?m)^\s*default_permissions\s*=' -or
+                $fenceText -match '(?m)^\s*\[permissions(?:\.|\])'
+            )
+            if ($hasLegacySettings -and $hasPermissionProfile) {
+                return $true
+            }
+            $insideFence = $false
+            $fenceCharacter = ''
+            $fenceLength = 0
+            $fenceLines.Clear()
+            continue
+        }
+
+        $fenceLines.Add($line) | Out-Null
+    }
+
+    return $false
+}
+
+function Assert-NoMixedPermissionConfigFence {
+    param([string]$RelativePath)
+
+    $filePath = Get-RepoFilePath -RelativePath $RelativePath
+    if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+        Add-Failure "Cannot inspect missing file: $RelativePath (permission config examples)"
+        return
+    }
+
+    if (Test-ContainsMixedPermissionConfigFence -Lines (Get-Content -LiteralPath $filePath)) {
+        Add-Failure "$RelativePath contains a fenced example that mixes legacy sandbox settings with permission profiles."
+    }
+}
+
+function Test-PermissionConfigFenceGuard {
+    # Pin every selector/table combination. A one-sided check can otherwise
+    # miss three valid spellings of the same unsupported mixed configuration.
+    $cases = @(
+        @{
+            Name = 'sandbox_mode plus default_permissions'
+            Lines = @('```toml', 'sandbox_mode = "workspace-write"', 'default_permissions = ":workspace"', '```')
+            Expected = $true
+        },
+        @{
+            Name = 'sandbox_mode plus permissions table'
+            Lines = @('```toml', 'sandbox_mode = "workspace-write"', '[permissions.dev]', 'extends = ":workspace"', '```')
+            Expected = $true
+        },
+        @{
+            Name = 'sandbox_workspace_write plus default_permissions'
+            Lines = @('```toml', 'default_permissions = ":workspace"', '[sandbox_workspace_write]', 'network_access = false', '```')
+            Expected = $true
+        },
+        @{
+            Name = 'sandbox_workspace_write plus permissions table'
+            Lines = @('```toml', '[permissions.dev]', 'extends = ":workspace"', '[sandbox_workspace_write]', 'network_access = false', '```')
+            Expected = $true
+        },
+        @{
+            Name = 'permission profile only'
+            Lines = @('```toml', 'default_permissions = "dev"', '[permissions.dev]', 'extends = ":workspace"', '```')
+            Expected = $false
+        },
+        @{
+            Name = 'legacy settings only'
+            Lines = @('```toml', 'sandbox_mode = "workspace-write"', '[sandbox_workspace_write]', 'network_access = false', '```')
+            Expected = $false
+        }
+    )
+
+    foreach ($case in $cases) {
+        $actual = Test-ContainsMixedPermissionConfigFence -Lines $case.Lines
+        if ($actual -ne $case.Expected) {
+            Add-Failure "Permission config fence guard failed synthetic case: $($case.Name)"
+        }
+    }
+}
+
 function Test-SkillFrontmatter {
     $skillPath = Get-RepoFilePath -RelativePath 'SKILL.md'
     if (-not (Test-Path -LiteralPath $skillPath -PathType Leaf)) {
@@ -143,9 +252,21 @@ Assert-FileContains -RelativePath 'SKILL.md' -Pattern "couldn't create signal pi
 Assert-FileContains -RelativePath 'SKILL.md' -Pattern 'SetNamedSecurityInfoW failed: 5' -Description 'verbatim SetNamedSecurityInfoW error string'
 Assert-FileContains -RelativePath 'SKILL.md' -Pattern 'FilesystemPermissionToml' -Description 'verbatim config parse error enum name'
 Assert-FileContains -RelativePath 'SKILL.md' -Pattern '(?im)does not recommend bypassing or disabling the sandbox' -Description 'no-sandbox-bypass safety posture statement'
+Assert-FileContains -RelativePath 'SKILL.md' -Pattern '(?ims)permission profiles.*do not compose.*sandbox_mode' -Description 'permission profiles versus legacy sandbox settings contract'
 Assert-FileContains -RelativePath 'docs/SKILL.ja.md' -Pattern 'CreateProcessAsUserW failed: 5' -Description 'verbatim CreateProcessAsUserW error string (Japanese version)'
 Assert-FileContains -RelativePath 'docs/SKILL.ja.md' -Pattern 'FilesystemPermissionToml' -Description 'verbatim config parse error enum name (Japanese version)'
+Assert-FileContains -RelativePath 'docs/SKILL.ja.md' -Pattern '(?ims)permission profile.*sandbox_mode.*併用' -Description 'permission profiles versus legacy sandbox settings contract (Japanese version)'
 
+foreach ($permissionDocument in @(
+    'SKILL.md',
+    'docs/SKILL.ja.md',
+    'examples/config-toml-permissions.md',
+    'examples/layer-triage-checklist.md'
+)) {
+    Assert-NoMixedPermissionConfigFence -RelativePath $permissionDocument
+}
+
+Test-PermissionConfigFenceGuard
 Test-SkillFrontmatter
 
 if ($failures.Count -gt 0) {

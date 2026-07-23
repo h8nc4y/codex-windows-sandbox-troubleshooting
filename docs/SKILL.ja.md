@@ -19,6 +19,10 @@ ACL・特権・モードをいじり回さないこと。
   <version>; may be fixed in later versions — retest before applying
   workarounds」（当該版での観測であり、以降の版では修正されている可能性が
   ある。回避策を適用する前に再検証すること）という限定つきで読んでください。
+- 症状 (d)・(e) の permission profile 合成規則は、2026-07-23 に確認した
+  現行の公式 Permissions ドキュメントに基づきます。permission profile は
+  beta のため、後の Codex 版へ設定をコピーする前に一次情報を再確認して
+  ください。
 - この skill はサンドボックスの回避・無効化を修復手段として推奨しません。
   以下の復旧手順はすべて最小権限側へ倒します: PowerShell fallback、狭い
   profile 権限、コマンド単位のエスカレーション。バイパス
@@ -31,6 +35,8 @@ ACL・特権・モードをいじり回さないこと。
   エラー文字列のどれかで失敗する。
 - `config.toml` を編集した直後から、マシン上の全 Codex セッションが起動
   しなくなった。
+- named permission profile はパースされるのに、`sandbox_mode` の設定や CLI
+  `--sandbox` の追加後から適用されなくなった。
 - Git Bash / MSYS2 系ツールが、Windows サンドボックス有効時だけ失敗する。
 - `config.toml` で `write` を許可しているのに、workspace 外パスへの書込みが
   拒否される。
@@ -57,6 +63,7 @@ OS ACL、runner の健全性の3つが揃う必要があります。
 | 見えているエラー | 失敗している層 | 節 |
 | --- | --- | --- |
 | `data did not match any variant of untagged enum FilesystemPermissionToml` | 1. Config ロード | (d) |
+| `sandbox_mode` または CLI `--sandbox` が有効な間だけ permission profile の grant が無視される | Config 選択 | (d) |
 | sandbox setup log 内の `SetNamedSecurityInfoW failed: 5` | 2. Setup helper（ACL 準備） | (c) |
 | `windows sandbox: runner error: CreateProcessAsUserW failed: 5` | 3. プロセス生成 | (a) |
 | `CreateFileMapping ... Win32 error 5` / `couldn't create signal pipe`（Git Bash / MSYS2 のみ） | 4. サンドボックス内 runtime | (b) |
@@ -261,6 +268,25 @@ fallback 運用中に織り込むべき帰結:
 
 ## 症状 (d): `config.toml` の filesystem 権限トークン — ブリックの罠
 
+Permission profile は beta で、旧式の `sandbox_mode` /
+`[sandbox_workspace_write]` とは**併用できません**。1セッションでは次の
+どちらか一方を選びます:
+
+- permission profile 方式: `default_permissions` と
+  `[permissions.<name>]` を使い、ロード対象の全 config layer から
+  `sandbox_mode` と `[sandbox_workspace_write]` を除く。
+- 旧方式: `sandbox_mode` と、必要なら `[sandbox_workspace_write]` を使い、
+  `[permissions.*]` / `default_permissions` が適用されるとは考えない。
+
+どのロード対象 config にでも `sandbox_mode` がある、選択した config
+profile がそれを設定する、または CLI へ `--sandbox` を渡すと、Codex は
+`default_permissions` より旧方式を優先します。Windows native backend を
+選ぶ `[windows] sandbox = "elevated" | "unelevated"` は、top-level の旧
+`sandbox_mode` とは別物で、どちらの方式とも組み合わせられます。文書化
+された例外は managed `allowed_permission_profiles` で、permission profile
+を強制します。これを配備する管理者は、公式手順どおり旧設定を除去して
+ください。
+
 `[permissions.<profile>.filesystem]` の権限値が受け付けるトークンは
 ちょうど3つです:
 
@@ -272,10 +298,18 @@ fallback 運用中に織り込むべき帰結:
 です。
 
 ```toml
-# 正しい例
+# 正しい permission profile 例。sandbox_mode は追加しない。
+default_permissions = "dev"
+
+[permissions.dev]
+extends = ":workspace"
+
 [permissions.dev.filesystem]
+glob_scan_max_depth = 3
 "C:/path/to/data"    = "write"
 "C:/path/to/ref"     = "read"
+
+[permissions.dev.filesystem.":workspace_roots"]
 "**/*.env"           = "deny"
 ```
 
@@ -300,18 +334,22 @@ data did not match any variant of untagged enum FilesystemPermissionToml
 4. ブリックしてしまったら: バックアップを復元するか、直近の編集から無効
    トークンを探す — 観測したパースエラーは行を教えてくれませんでした。
 
-参照: 公式の permissions ドキュメント
-https://developers.openai.com/codex/permissions
+参照（2026-07-23確認）: 公式の Permissions ドキュメント
+https://learn.chatgpt.com/docs/permissions
 
 ## 症状 (e): workspace 外への書込みには3条件が要る
 
 Windows では、`config.toml` の write 許可だけでは workspace（cwd）外の
 パスへ書けるようになりません。次の3つがすべて成立している必要があります:
 
-1. **Config**: `sandbox_mode = "workspace-write"`（`read-only` では何も
-   書けません — これが大元のゲート）に加えて、アクティブな profile の
-   `[permissions.<profile>.filesystem]` に `"<絶対パス>" = "write"` の
-   許可があること。
+1. **Config**: 2方式を混ぜず、どちらか一方を選ぶ。permission profile
+   方式では、`default_permissions` が選ぶ profile の
+   `[permissions.<profile>.filesystem]` に
+   `"<絶対パス>" = "write"` があり、ロード対象の config layer にも CLI
+   `--sandbox` にも旧方式の選択がないこと。旧方式では
+   `sandbox_mode = "workspace-write"` と
+   `[sandbox_workspace_write].writable_roots` を使い、permission profile
+   の grant と併用しないこと。
 2. **OS ACL**: サンドボックスは専用のローカル・サンドボックスユーザー／
    グループとしてコマンドを実行します — workspace の ACL に
    `<HOST>\CodexSandboxUsers` のようなエントリが Modify 権限つきで見え、

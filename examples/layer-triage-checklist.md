@@ -28,6 +28,12 @@ failing **API name** locates the layer; the number does not.
   (typically at `~/.codex/config.toml`), or re-check your latest edit —
   the only valid filesystem permission tokens are `read` / `write` /
   `deny`.
+- Config parses but a permission-profile grant appears ineffective →
+  check every loaded config layer, the selected config profile, and the
+  CLI invocation. Permission profiles do not compose with
+  `sandbox_mode` / `[sandbox_workspace_write]`; any legacy
+  `sandbox_mode` or CLI `--sandbox` selects the legacy system instead of
+  `default_permissions`.
 
 ### Step 1 — On the `elevated` backend, does setup complete?
 
@@ -70,8 +76,10 @@ failing **API name** locates the layer; the number does not.
 ### Step 4 — Commands run, but writes outside the workspace fail?
 
 - **Symptom (e)**: three independent conditions must all hold —
-  1. config: `sandbox_mode = "workspace-write"` plus a profile `write`
-     grant on the target path;
+  1. config: one system only — either `default_permissions` selects a
+     profile with a `write` grant on the target and no legacy selector is
+     loaded, or legacy `sandbox_mode = "workspace-write"` lists the path
+     under `[sandbox_workspace_write].writable_roots`;
   2. OS ACL: the sandbox user/group (an entry like
      `<HOST>\CodexSandboxUsers`) has Modify on the target path;
   3. runner health: symptom (a) is not active.

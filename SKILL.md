@@ -10,9 +10,10 @@ description: >-
   elevated setup helper's "SetNamedSecurityInfoW failed: 5", every session
   bricked by "data did not match any variant of untagged enum
   FilesystemPermissionToml" after a config.toml permissions edit, or denied
-  writes outside the workspace despite a config write grant. Covers the codex
-  sandbox CLI bisect, PowerShell fallback for Git Bash, safe config editing,
-  and least-privilege recovery without disabling the sandbox.
+  writes outside the workspace despite a config write grant, including a
+  permission profile ignored because legacy sandbox settings are loaded.
+  Covers the codex sandbox CLI bisect, PowerShell fallback for Git Bash,
+  config editing, and least-privilege recovery without disabling the sandbox.
 ---
 
 # Codex Windows Sandbox Troubleshooting
@@ -32,6 +33,10 @@ is known.
   build 26.707.3351.0 alongside CLI 0.142.5). Sandbox internals change:
   observed on those versions; may be fixed in later versions — retest before
   applying workarounds.
+- The permission-profile composition rules in symptoms (d) and (e) come
+  from the current official Permissions documentation, checked on
+  2026-07-23. Permission profiles are beta, so re-check that source before
+  copying configuration into a later Codex release.
 - This skill does not recommend bypassing or disabling the sandbox. Every
   recovery below moves toward least privilege first: PowerShell fallback,
   narrow profile grants, per-command escalation. Where a bypass exists
@@ -44,6 +49,8 @@ is known.
   strings in the triage table below.
 - Every Codex session on the machine suddenly fails to start after a
   `config.toml` edit.
+- A named permission profile parses but appears to be ignored after a
+  `sandbox_mode` setting or CLI `--sandbox` flag is introduced.
 - Git Bash or MSYS2 tools fail only when the Windows sandbox is enabled.
 - Writes to a path outside the workspace are denied even though
   `config.toml` grants `write` on it.
@@ -70,6 +77,7 @@ grant, OS ACL, and runner health must all hold.
 | Error you see | Failing layer | Section |
 | --- | --- | --- |
 | `data did not match any variant of untagged enum FilesystemPermissionToml` | 1. Config load | (d) |
+| A permission-profile grant is ignored while `sandbox_mode` or CLI `--sandbox` is active | Config selection | (d) |
 | `SetNamedSecurityInfoW failed: 5` in the sandbox setup log | 2. Setup helper (ACL preparation) | (c) |
 | `windows sandbox: runner error: CreateProcessAsUserW failed: 5` | 3. Process creation | (a) |
 | `CreateFileMapping ... Win32 error 5` or `couldn't create signal pipe` (Git Bash / MSYS2 only) | 4. In-sandbox runtime | (b) |
@@ -275,6 +283,26 @@ Consequences to plan around while running the fallback:
 
 ## Symptom (d): `config.toml` Filesystem Permission Tokens — The Brick Trap
 
+Permission profiles are beta and **do not compose with the older
+`sandbox_mode` / `[sandbox_workspace_write]` settings**. Choose one
+configuration system for a session:
+
+- Permission-profile path: set `default_permissions` and define
+  `[permissions.<name>]`; remove `sandbox_mode` and
+  `[sandbox_workspace_write]` from every loaded config layer.
+- Legacy path: set `sandbox_mode` and, when needed,
+  `[sandbox_workspace_write]`; do not expect `[permissions.*]` or
+  `default_permissions` to apply.
+
+If `sandbox_mode` appears in any loaded config, the selected config profile
+sets it, or the CLI passes `--sandbox`, Codex uses the legacy settings
+instead of `default_permissions`. The Windows-native backend selector
+`[windows] sandbox = "elevated" | "unelevated"` is separate from the
+top-level legacy `sandbox_mode` and may accompany either system. The
+documented exception is managed `allowed_permission_profiles`, which
+forces permission profiles; administrators deploying it should remove the
+older settings as the official guide requires.
+
 The filesystem permission values in `[permissions.<profile>.filesystem]`
 accept exactly three tokens:
 
@@ -285,10 +313,18 @@ accept exactly three tokens:
 There is no `read-write` token. Write access is `write`, one word.
 
 ```toml
-# Valid example
+# Valid permission-profile example. Do not add sandbox_mode.
+default_permissions = "dev"
+
+[permissions.dev]
+extends = ":workspace"
+
 [permissions.dev.filesystem]
+glob_scan_max_depth = 3
 "C:/path/to/data"    = "write"
 "C:/path/to/ref"     = "read"
+
+[permissions.dev.filesystem.":workspace_roots"]
 "**/*.env"           = "deny"
 ```
 
@@ -314,18 +350,22 @@ Safe editing procedure:
    for an invalid token — the observed parse error did not point at the
    line.
 
-Reference: the official permissions documentation at
-https://developers.openai.com/codex/permissions
+Reference (checked 2026-07-23): the official Permissions documentation at
+https://learn.chatgpt.com/docs/permissions
 
 ## Symptom (e): Writing Outside The Workspace Needs Three Conditions
 
 On Windows, a `config.toml` write grant alone does not make a path outside
 the workspace (cwd) writable. All three of these must hold:
 
-1. **Config**: `sandbox_mode = "workspace-write"` (under `read-only`
-   nothing is writable — it is the global gate), plus the active profile's
-   `[permissions.<profile>.filesystem]` granting `"<absolute path>" =
-   "write"`.
+1. **Config**: choose one configuration system, not a mixture. On the
+   permission-profile path, `default_permissions` must select a profile
+   whose `[permissions.<profile>.filesystem]` grants
+   `"<absolute path>" = "write"`, and no loaded config layer or CLI
+   `--sandbox` may select the legacy system. On the legacy path, use
+   `sandbox_mode = "workspace-write"` plus the path in
+   `[sandbox_workspace_write].writable_roots`; do not combine that with a
+   permission-profile grant.
 2. **OS ACL**: the sandbox executes commands as a dedicated local sandbox
    user/group — visible as an entry like `<HOST>\CodexSandboxUsers` with
    Modify rights in the workspace's ACL, which Codex adds to the workspace
