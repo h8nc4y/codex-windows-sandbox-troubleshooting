@@ -1,7 +1,8 @@
 # config.toml Permissions: Correct Usage And Brick Recovery
 
 Companion to symptom (d) and (e) in [SKILL.md](../SKILL.md). Placeholders
-only. Reference: <https://developers.openai.com/codex/permissions>
+only. Official reference checked 2026-07-23:
+<https://learn.chatgpt.com/docs/permissions>
 
 ## The Only Three Tokens
 
@@ -9,16 +10,52 @@ Filesystem permission values in `[permissions.<profile>.filesystem]`
 accept exactly `read`, `write`, and `deny`:
 
 ```toml
-# Valid — copy this shape.
-sandbox_mode = "workspace-write"   # the global gate; read-only writes nothing
+# Valid permission-profile shape. Do not add sandbox_mode.
+default_permissions = "dev"
+
+[permissions.dev]
+extends = ":workspace"
 
 [permissions.dev.filesystem]
+glob_scan_max_depth = 3
 "C:/path/to/data"  = "write"   # read AND write (create/rename/delete included)
 "C:/path/to/ref"   = "read"    # read only
+
+[permissions.dev.filesystem.":workspace_roots"]
 "**/*.env"         = "deny"    # carve-out: no access even under a write grant
 ```
 
 There is no `read-write` token. Write access is `write`, one word.
+
+## Choose One Configuration System
+
+Permission profiles are beta and do not compose with the older
+`sandbox_mode` / `[sandbox_workspace_write]` settings:
+
+- Permission-profile path: use `default_permissions` plus
+  `[permissions.<name>]`, with no `sandbox_mode` or
+  `[sandbox_workspace_write]` in any loaded config layer.
+- Legacy path: use `sandbox_mode` plus `[sandbox_workspace_write]` when
+  needed; do not expect `default_permissions` or `[permissions.*]` to
+  apply.
+
+If `sandbox_mode` appears in any loaded config, the selected config
+profile sets it, or the command passes `--sandbox`, Codex selects the
+legacy system instead of `default_permissions`. The native Windows
+`[windows] sandbox = "elevated" | "unelevated"` selector is separate and
+can accompany either system. Managed `allowed_permission_profiles` is the
+documented exception that forces permission profiles; administrators
+deploying it should remove older settings as the official guide requires.
+
+For comparison, this is a legacy-only shape; keep it in a different
+configuration from the permission-profile example above:
+
+```toml
+sandbox_mode = "workspace-write"
+
+[sandbox_workspace_write]
+writable_roots = ["C:/path/to/data"]
+```
 
 ## The Brick: What An Invalid Token Does
 
@@ -44,8 +81,9 @@ Consequences (field-observed):
    Copy-Item -LiteralPath "$HOME\.codex\config.toml" -Destination "$HOME\.codex\config.toml.bak"
    ```
 
-2. Edit, using only `read` / `write` / `deny` as filesystem permission
-   values.
+2. Choose either permission profiles or the legacy sandbox settings,
+   never both. On the permission-profile path, use only `read` / `write` /
+   `deny` as filesystem permission values.
 3. **Load-check immediately** — start one session, or run any trivial CLI
    command that loads the config, and confirm no parse error appears.
    Never batch-edit and walk away.
@@ -69,8 +107,11 @@ Consequences (field-observed):
 On Windows, writing to a path outside the workspace needs all three
 (symptom (e) in SKILL.md):
 
-1. Config: `sandbox_mode = "workspace-write"` plus the profile's
-   `"<absolute path>" = "write"` grant.
+1. Config: one complete configuration system. Either
+   `default_permissions` selects a profile with an
+   `"<absolute path>" = "write"` grant and no legacy selector is loaded,
+   or the legacy `sandbox_mode = "workspace-write"` configuration lists
+   the path in `[sandbox_workspace_write].writable_roots`.
 2. OS ACL: the dedicated sandbox user/group (an entry like
    `<HOST>\CodexSandboxUsers`) holding Modify on the target — Codex adds
    this to the workspace automatically, but not to outside paths. Granting

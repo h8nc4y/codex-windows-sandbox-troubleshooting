@@ -37,7 +37,9 @@ skill documents, from field experience:
   `read` / `write` / `deny`; an invalid token (such as `read-write`) fails
   the whole config parse with `data did not match any variant of untagged
   enum FilesystemPermissionToml` and bricks every session. Backup and
-  post-edit load checks are the discipline.
+  post-edit load checks are the discipline. Permission profiles do not
+  compose with legacy `sandbox_mode` / `sandbox_workspace_write`; a mixed
+  configuration uses the legacy system instead of `default_permissions`.
 - **Symptom (e)** — writing outside the workspace needs three independent
   conditions (config grant, OS ACL, healthy runner); why that stack is
   fragile and what to do instead.
@@ -144,6 +146,8 @@ Reach for the skill when you see one of these:
 - Every Codex session fails to start after a `config.toml` edit, with
   `data did not match any variant of untagged enum
   FilesystemPermissionToml`.
+- A named permission profile parses but its grants are ignored while a
+  legacy `sandbox_mode` setting or CLI `--sandbox` flag is active.
 - A path outside the workspace stays read-only although `config.toml`
   grants `write` on it.
 
@@ -175,8 +179,8 @@ repository paths you cannot publish, or customer data in public issues.
   [openai/codex#7031](https://github.com/openai/codex/issues/7031),
   [openai/codex#12000](https://github.com/openai/codex/issues/12000),
   [openai/codex#15016](https://github.com/openai/codex/issues/15016)
-- Permissions documentation:
-  <https://developers.openai.com/codex/permissions>
+- Permissions documentation (checked 2026-07-23):
+  <https://learn.chatgpt.com/docs/permissions>
 
 Issue states change; check them before assuming a behavior still holds.
 
@@ -201,7 +205,9 @@ helper → プロセス生成 → サンドボックス内 runtime の順に見�
 - 症状 (d): config.toml の filesystem 権限トークンは `read` / `write` /
   `deny` の3つだけ。`read-write` 等の無効値は config 全体をロード不能にし、
   全セッションが起動不能（ブリック）。編集前バックアップ・編集後ロード確認
-  が必須。
+  が必須。permission profile と旧 `sandbox_mode` /
+  `sandbox_workspace_write` は併用できず、混在時は旧方式が
+  `default_permissions` より優先される。
 - 症状 (e): workspace 外への書込みは (1) config の write 許可 (2) OS ACL
   (3) runner の健全性（サンドボックスユーザーとしてのプロセス生成が通る
   こと）、の3条件がすべて要る。
@@ -234,10 +240,12 @@ helper → プロセス生成 → サンドボックス内 runtime の順に見�
 
 ## Limitations
 
-- Everything is field-observed on Codex CLI 0.142.5-era builds (as of July
-  2026). Sandbox internals change between versions; retest before applying
-  any workaround on a newer Codex, and expect some symptoms to be fixed
-  upstream over time.
+- Runtime failures are field-observed on Codex CLI 0.142.5-era builds (as
+  of July 2026). The permission-profile non-composition rule comes from
+  the official beta Permissions documentation checked on 2026-07-23.
+  Sandbox internals and beta configuration may change; re-check the
+  official source and retest before applying a workaround on a newer
+  Codex.
 - The failures require an already-broken environment to reproduce, so this
   repository's CI cannot reproduce them. CI validates document structure
   and scans for private markers; the commands are syntax-checked and

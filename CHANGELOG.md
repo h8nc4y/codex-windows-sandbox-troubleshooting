@@ -6,6 +6,23 @@ The format loosely follows Keep a Changelog conventions.
 
 ## Unreleased
 
+### Fixed
+
+- Corrected the permission guidance so it no longer combines beta
+  permission profiles with legacy `sandbox_mode` /
+  `sandbox_workspace_write`. The English and Japanese skills and both
+  permission examples now explain that the two configuration systems are
+  mutually exclusive, that any loaded legacy selector takes precedence
+  over `default_permissions`, and that `[windows] sandbox` is a separate
+  native-backend choice.
+
+### Changed
+
+- Added a Markdown-fence validation guard that rejects copy-paste examples
+  mixing `sandbox_mode` with `[permissions.*]`, and pinned the current
+  composition contract to the official Permissions documentation checked
+  on 2026-07-23.
+
 ## 0.1.0 - 2026-07-16
 
 ### Added
