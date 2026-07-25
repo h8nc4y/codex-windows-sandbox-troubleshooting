@@ -8,6 +8,53 @@ The format loosely follows Keep a Changelog conventions.
 
 ### Fixed
 
+- Hardened private-marker maintenance as one bounded contract: staged and
+  working-tree text views are checked consistently, repository state is
+  revalidated before reporting, unsafe filesystem states fail closed, and
+  diagnostics and scan resources have explicit limits.
+- Added a shared cross-platform process boundary with finite deadlines,
+  bounded streams, and descendant cleanup, plus regression coverage for
+  repository state, filesystem handling, limits, diagnostics, and cleanup.
+- Added a lower-only 120-second scan-wide deadline, a 64 KiB atomic finding
+  output cap, and immediate deadline checks before fixed failure, finding,
+  and success writes without taking ownership of standard output.
+- Added Windows assignment/resume/Job-close failure injection that verifies
+  suspended child termination, aggregate cleanup, explicit stream disposal,
+  and PID disappearance. Added fixed `git-probe` failures for invalid root
+  and ancestor `.git` files/directories, Git-proven linked-worktree support,
+  and OS-aware `.git` / `.GIT` handling.
+- Revalidated tracked working-tree and local-marker bytes and presence
+  immediately after the final raw index snapshots, detected local-marker
+  entries without following dangling links, rejected backslash-bearing Git
+  paths, preserved filesystem-root identity during canonicalization, and
+  started the process deadline clock before launch and POSIX session-gate
+  setup. Success acceptance now rejects an elapsed total deadline even when
+  the child has already exited or stream/cleanup work crosses the deadline,
+  with deterministic post-exit and post-cleanup regression fixtures.
+- Rechecked raw staged entry and debug metadata snapshots after final
+  working-tree/local-marker byte revalidation, closing the last index-only
+  mutation window with third-listing race fixtures.
+- Replaced inherited Git child environments with a fixed executable-derived
+  allowlist, and collapsed invalid invocation and uncaught boundary failures
+  to fixed redacted exit-2 diagnostics without absolute path disclosure.
+- Removed the public scanner parameter binder so invalid PowerShell common
+  parameters reach the same raw-token diagnostic, and made launch cleanup
+  continue through all streams, safe handles, and a final Job-close retry.
+- Added first-call AST ownership regressions (including `.Invoke()` and
+  `.InvokeReturnAsIs()`), rejected runtime or ambient scriptblocks in
+  pre-raw pipelines, wrapper commands, and receiver-bound member dispatch,
+  and required custom helpers to be unconditional top-level definitions
+  executed before use. Module-qualified commands no longer inherit builtin
+  or raw-target trust. Added byte-exact binary standard-stream coverage and
+  a native `git cat-file --batch` fixture that detects a PowerShell 5.1 stdin
+  preamble or caller console-encoding drift.
+- Required receiver assignments to unconditionally dominate member calls,
+  required `foreach` receiver values to come from source-bound enumerations,
+  rejected ambient `global:` callable selection, and isolated each self-test
+  run's scanner children in a suite-owned temporary namespace.
+- Preserved and regression-tested this skill's repository URL allowlist,
+  documented Windows system-path examples, and
+  `CODEX_WINDOWS_SANDBOX_TROUBLESHOOTING_PRIVATE_MARKERS` input.
 - Corrected the permission guidance so it no longer combines beta
   permission profiles with legacy `sandbox_mode` /
   `sandbox_workspace_write`. The English and Japanese skills and both
@@ -18,6 +65,12 @@ The format loosely follows Keep a Changelog conventions.
 
 ### Changed
 
+- Expanded validation to a bounded Windows job covering PowerShell 7 and
+  Windows PowerShell 5.1 plus a bounded Ubuntu 24.04 job, pinned checkout
+  to an immutable revision, and made the readiness validator own the exact
+  triggers, read-only permission, job set, step, property, runner, timeout,
+  checkout, recursive committed-tree whitespace check, and four-file BOM
+  contracts.
 - Added a Markdown-fence validation guard that rejects copy-paste examples
   mixing `sandbox_mode` with `[permissions.*]`, and pinned the current
   composition contract to the official Permissions documentation checked

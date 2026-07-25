@@ -47,6 +47,14 @@ stated version. Keep it that way:
   load-bearing (it teaches the bisect-first discipline); do not edit it
   away for brevity.
 
+## Repository Hygiene
+
+Tracked text uses UTF-8 without BOM, LF, and no trailing whitespace by
+default. The scanner, its process helper, its self-test, and the readiness
+validator are the documented exception: Windows PowerShell 5.1 executes
+these `.ps1` files with Japanese comments, so they intentionally retain a
+UTF-8 BOM. The readiness validator enforces this contract.
+
 ## Development Workflow
 
 1. Create a focused branch.
@@ -65,6 +73,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\validate-oss-readi
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-scan-private-markers.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\scan-private-markers.ps1
 git diff --check
+git diff --cached --check
 ```
 
 If `pwsh` is available, it is also acceptable for the PowerShell scripts:

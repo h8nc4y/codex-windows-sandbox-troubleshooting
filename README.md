@@ -292,11 +292,74 @@ Also run Git whitespace checks on your working changes before publishing:
 
 ```bash
 git diff --check
+git diff --cached --check
 ```
 
 The GitHub Actions workflow runs the same validation, scan self-test,
 private-marker scan, and whitespace check on pull requests and pushes to
-`main`.
+`main`. Windows runs the self-test separately under PowerShell 7 and
+Windows PowerShell 5.1; Ubuntu 24.04 runs the PowerShell 7 self-test for
+the POSIX process boundary. Both jobs have a ten-minute timeout and use an
+immutable checkout action revision.
+
+The scanner, its process helper, its self-test, and the readiness validator
+contain Japanese comments and are also executed by Windows PowerShell 5.1.
+These four files intentionally retain a UTF-8 BOM; the validator enforces
+that exception.
+
+Git-backed discovery is finite and isolated. Each Git command receives a
+fixed-allowlist child environment, isolated configuration, bounded output,
+and a deadline of at most 15 seconds. Unknown ambient and caller-provided
+variables are discarded before the child starts. Windows starts the
+requested executable suspended, gives only its three standard-stream
+handles to the child, assigns it to a kill-on-close Job, and only then
+resumes it. Assignment, resume, and consecutive Job-close failure regressions
+terminate the still-suspended process, continue every remaining cleanup step,
+aggregate the failures, and verify its exit within a finite wait. Every
+standard stream that was created is disposed explicitly.
+The direct native transport uses fixed 8 KiB buffers and raw byte streams,
+so Windows PowerShell 5.1 cannot inject CLIXML or a UTF-8 stdin preamble;
+regression
+fixtures compare binary stdin/stdout/stderr and native
+`git cat-file --batch` output byte for byte. POSIX starts the command
+in a dedicated session/process group and cleans up that group when the
+command times out or leaves an incomplete stream. The same total process
+deadline is checked before initial success acceptance and again after stream
+drain, descendant cleanup, and handle disposal.
+
+Within a repository, the scanner checks recognized staged text blobs and
+differing regular working-tree files. It requires both the final raw staged
+entry and flag snapshots, each tracked working-tree file's presence and
+bytes, and the local marker file's presence and bytes to match their initial
+snapshots before reporting success. Raw staged entry and flag snapshots are
+checked both before and after the final working-tree/local-marker
+revalidation. File count, bytes, line length/count,
+rule traversal, findings,
+the 64 KiB serialized finding payload, process output, and the scan-wide
+deadline of at most 120 seconds are independently bounded. The deadline is
+checked again immediately before any clock-scoped failure diagnostic,
+finding payload, or success line is written. The public scanner has no
+PowerShell parameter block, so common-parameter binding cannot fail before
+its raw-token validator. Invalid public arguments and uncaught helper,
+process, provider, isolation, or cleanup failures collapse to fixed redacted
+exit-2 diagnostics without printing an absolute path.
+Diagnostics escape control and formatting characters and never print the
+matched value.
+
+Working-tree fallback is limited to confirmed non-repositories or hosts
+where Git is unavailable and no `.git` entry exists in the target
+ancestry. A root or ancestor `.git` file/directory that does not establish
+a valid repository exits with the fixed `git-probe` integrity diagnostic.
+A linked-worktree `.git` file is accepted only when Git proves the exact
+checkout root. Metadata-name matching follows the operating system:
+Windows treats `.git` and `.GIT` alike, while POSIX keeps `.GIT` as
+ordinary case-sensitive content. Nested `.git` control entries remain
+excluded from fallback content.
+Other Git failures, unsupported repository entries,
+symlink/reparse paths, inconsistent repository state, invalid text input,
+and incomplete process output stop the scan instead of changing its
+scope. The scanner remains a targeted marker check, not a universal
+content classifier.
 
 ## Contributing
 
