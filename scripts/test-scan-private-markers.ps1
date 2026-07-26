@@ -2667,6 +2667,19 @@ try {
     Assert-FirstProcessInvocationValidatorRegressions
     Assert-FirstProcessInvocationIsRawTransport
 
+    # macOS evidence modeはexternal setsidが無いnative gateを実測する。
+    # cold pwsh/Add-Typeだけtest-onlyで30秒まで許容し、他hostの既定値は守る。
+    $availableSetSidPath = @('/usr/bin/setsid', '/bin/setsid') |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        Select-Object -First 1
+    $usesNativePosixSessionGate =
+        -not (Test-PrivateMarkerWindowsHost) -and
+        [string]::IsNullOrWhiteSpace([string]$availableSetSidPath)
+    $processTestTimeoutMilliseconds =
+        if ($RequireMacOSNativePosixContainment) { 30000 } else { 10000 }
+    $rawTransportTestTimeoutMilliseconds =
+        if ($RequireMacOSNativePosixContainment) { 30000 } else { 5000 }
+
     # 最初の eager bounded call で binary stdin、partial stdout/stderr、
     # EOF、非 0 exit code を framing や UTF-8 preamble なしで固定する。
     $rawTransportScript = @'
@@ -2709,7 +2722,7 @@ exit 37
         -Arguments $rawTransportArguments `
         -WorkingDirectory $tempRoot `
         -StandardInputBytes $rawTransportInput `
-        -TimeoutMilliseconds 5000 `
+        -TimeoutMilliseconds $rawTransportTestTimeoutMilliseconds `
         -MaximumStandardOutputBytes 64 `
         -MaximumStandardErrorBytes 64
     [byte[]]$expectedRawStderr = @(
@@ -2736,56 +2749,61 @@ exit 37
         Add-Failure 'Expected the successful Windows process boundary to dispose all three standard FileStreams explicitly.'
     }
 
-    # child 自体は 0 で即時終了させ、終了確認後だけ self-test seam で
-    # deadline を消費する。旧「未終了かつ期限超過」条件なら TimedOut=false
-    # になり、host負荷に依存せず終了済み成功の誤受理を検出できる。
-    $instantExitExecutable = if (Test-PrivateMarkerWindowsHost) {
-        [Environment]::GetEnvironmentVariable('ComSpec', 'Process')
-    } else {
-        '/bin/sh'
-    }
-    if ([string]::IsNullOrWhiteSpace($instantExitExecutable) -or
-        -not (Test-Path -LiteralPath $instantExitExecutable -PathType Leaf)) {
-        Add-Failure 'Expected an absolute native shell for the post-exit deadline regression.'
-    } else {
-        $instantExitArguments = if (Test-PrivateMarkerWindowsHost) {
-            @('/d', '/c', 'exit 0')
+    # native gateのcold startupはsub-second deadlineより前に起きるため、
+    # post-exit seamはdirect/external gate hostだけで決定的に検証する。
+    # native gate自身のdeadline cleanupは後段の専用1ms fixtureが所有する。
+    if (-not $usesNativePosixSessionGate) {
+        # child 自体は 0 で即時終了させ、終了確認後だけ self-test seam で
+        # deadline を消費する。旧「未終了かつ期限超過」条件なら TimedOut=false
+        # になり、host負荷に依存せず終了済み成功の誤受理を検出できる。
+        $instantExitExecutable = if (Test-PrivateMarkerWindowsHost) {
+            [Environment]::GetEnvironmentVariable('ComSpec', 'Process')
         } else {
-            @('-c', 'exit 0')
+            '/bin/sh'
         }
-        $expiredCompletedProcessResult = Invoke-PrivateMarkerProcess `
-            -FileName $instantExitExecutable `
-            -Arguments $instantExitArguments `
-            -WorkingDirectory $tempRoot `
-            -TimeoutMilliseconds 25 `
-            -TestOnlyPostExitDelayMilliseconds 100
-        if (-not $expiredCompletedProcessResult.TimedOut -or
-            $expiredCompletedProcessResult.ExitCode -ne 0 -or
-            $expiredCompletedProcessResult.OutputLimitExceeded -or
-            $expiredCompletedProcessResult.InputWriteFailed -or
-            $expiredCompletedProcessResult.PipeLeakDetected -or
-            -not $expiredCompletedProcessResult.StreamsCompleted -or
-            -not $expiredCompletedProcessResult.TreeStopped) {
-            Add-Failure 'Expected the post-exit delay deadline to reject an already exited zero-code child.'
-        }
+        if ([string]::IsNullOrWhiteSpace($instantExitExecutable) -or
+            -not (Test-Path -LiteralPath $instantExitExecutable -PathType Leaf)) {
+            Add-Failure 'Expected an absolute native shell for the post-exit deadline regression.'
+        } else {
+            $instantExitArguments = if (Test-PrivateMarkerWindowsHost) {
+                @('/d', '/c', 'exit 0')
+            } else {
+                @('-c', 'exit 0')
+            }
+            $expiredCompletedProcessResult = Invoke-PrivateMarkerProcess `
+                -FileName $instantExitExecutable `
+                -Arguments $instantExitArguments `
+                -WorkingDirectory $tempRoot `
+                -TimeoutMilliseconds 25 `
+                -TestOnlyPostExitDelayMilliseconds 100
+            if (-not $expiredCompletedProcessResult.TimedOut -or
+                $expiredCompletedProcessResult.ExitCode -ne 0 -or
+                $expiredCompletedProcessResult.OutputLimitExceeded -or
+                $expiredCompletedProcessResult.InputWriteFailed -or
+                $expiredCompletedProcessResult.PipeLeakDetected -or
+                -not $expiredCompletedProcessResult.StreamsCompleted -or
+                -not $expiredCompletedProcessResult.TreeStopped) {
+                Add-Failure 'Expected the post-exit delay deadline to reject an already exited zero-code child.'
+            }
 
-        # 初回期限検査は5秒以内に通過させ、stream回収後のtest-only seamだけで
-        # 残時間を消費する。cleanup後の再検査が無ければ TimedOut=false の
-        # ままなので、result受理直前のtotal deadlineを独立に固定する。
-        $expiredAfterInitialCheckResult = Invoke-PrivateMarkerProcess `
-            -FileName $instantExitExecutable `
-            -Arguments $instantExitArguments `
-            -WorkingDirectory $tempRoot `
-            -TimeoutMilliseconds 5000 `
-            -TestOnlyExpireDeadlineAfterInitialCheck
-        if (-not $expiredAfterInitialCheckResult.TimedOut -or
-            $expiredAfterInitialCheckResult.ExitCode -ne 0 -or
-            $expiredAfterInitialCheckResult.OutputLimitExceeded -or
-            $expiredAfterInitialCheckResult.InputWriteFailed -or
-            $expiredAfterInitialCheckResult.PipeLeakDetected -or
-            -not $expiredAfterInitialCheckResult.StreamsCompleted -or
-            -not $expiredAfterInitialCheckResult.TreeStopped) {
-            Add-Failure 'Expected the post-stream cleanup deadline to reject a zero-code child.'
+            # 初回期限検査は5秒以内に通過させ、stream回収後のtest-only seamだけで
+            # 残時間を消費する。cleanup後の再検査が無ければ TimedOut=false の
+            # ままなので、result受理直前のtotal deadlineを独立に固定する。
+            $expiredAfterInitialCheckResult = Invoke-PrivateMarkerProcess `
+                -FileName $instantExitExecutable `
+                -Arguments $instantExitArguments `
+                -WorkingDirectory $tempRoot `
+                -TimeoutMilliseconds 5000 `
+                -TestOnlyExpireDeadlineAfterInitialCheck
+            if (-not $expiredAfterInitialCheckResult.TimedOut -or
+                $expiredAfterInitialCheckResult.ExitCode -ne 0 -or
+                $expiredAfterInitialCheckResult.OutputLimitExceeded -or
+                $expiredAfterInitialCheckResult.InputWriteFailed -or
+                $expiredAfterInitialCheckResult.PipeLeakDetected -or
+                -not $expiredAfterInitialCheckResult.StreamsCompleted -or
+                -not $expiredAfterInitialCheckResult.TreeStopped) {
+                Add-Failure 'Expected the post-stream cleanup deadline to reject a zero-code child.'
+            }
         }
     }
 
@@ -2861,7 +2879,7 @@ exit 37
             -WorkingDirectory $rawGitRoot `
             -SanitizeGitEnvironment `
             -IsolationRoot $rawGitIsolationRoot `
-            -TimeoutMilliseconds 10000
+            -TimeoutMilliseconds $processTestTimeoutMilliseconds
         if ($rawGitInitResult.ExitCode -ne 0 -or
             $rawGitInitResult.TimedOut -or
             $rawGitInitResult.OutputLimitExceeded -or
@@ -2880,7 +2898,7 @@ exit 37
                 -WorkingDirectory $rawGitRoot `
                 -SanitizeGitEnvironment `
                 -IsolationRoot $rawGitIsolationRoot `
-                -TimeoutMilliseconds 10000
+                -TimeoutMilliseconds $processTestTimeoutMilliseconds
             $rawGitObjectId = [System.Text.Encoding]::ASCII.GetString(
                 $rawGitHashResult.StandardOutputBytes
             ).Trim()
@@ -2909,7 +2927,7 @@ exit 37
                     -SanitizeGitEnvironment `
                     -IsolationRoot $rawGitIsolationRoot `
                     -StandardInputBytes $rawGitBatchInput `
-                    -TimeoutMilliseconds 10000
+                    -TimeoutMilliseconds $processTestTimeoutMilliseconds
                 $rawGitHeaderBytes =
                     [System.Text.Encoding]::ASCII.GetBytes(
                         "$rawGitObjectId blob $($rawGitBlobBytes.Length)`n"
@@ -3029,7 +3047,7 @@ exit 0
         } `
         -SanitizeGitEnvironment `
         -IsolationRoot $hermeticEnvironmentIsolationRoot `
-        -TimeoutMilliseconds 10000
+        -TimeoutMilliseconds $processTestTimeoutMilliseconds
     if ($hermeticEnvironmentResult.ExitCode -ne 0 -or
         $hermeticEnvironmentResult.TimedOut -or
         $hermeticEnvironmentResult.OutputLimitExceeded -or
@@ -3091,7 +3109,7 @@ $stream.Flush()
         -WorkingDirectory $tempRoot `
         -MaximumStandardOutputBytes $boundaryLimit `
         -MaximumStandardErrorBytes 8192 `
-        -TimeoutMilliseconds 10000
+        -TimeoutMilliseconds $processTestTimeoutMilliseconds
     $expectedBoundaryPrefix = [System.Text.Encoding]::UTF8.GetBytes(
         ([char]0x5883).ToString() + [char]0x754C + ':'
     )
@@ -3149,7 +3167,7 @@ $stream.Flush()
         -WorkingDirectory $tempRoot `
         -MaximumStandardOutputBytes $boundaryLimit `
         -MaximumStandardErrorBytes 8192 `
-        -TimeoutMilliseconds 10000
+        -TimeoutMilliseconds $processTestTimeoutMilliseconds
     if (-not $overBoundaryResult.OutputLimitExceeded -or
         -not $overBoundaryResult.TreeStopped -or
         $overBoundaryResult.StandardOutputBytes.Length -gt $boundaryLimit) {
@@ -3186,7 +3204,7 @@ $stream.Flush()
         -WorkingDirectory $root `
         -MaximumStandardOutputBytes 256 `
         -MaximumStandardErrorBytes 512 `
-        -TimeoutMilliseconds 10000
+        -TimeoutMilliseconds $processTestTimeoutMilliseconds
     $hostileCombinedBytes = New-Object byte[] (
         $hostilePathResult.StandardOutputBytes.Length +
         $hostilePathResult.StandardErrorBytes.Length
@@ -3442,10 +3460,6 @@ $stream.Flush()
     }
 
     if (-not (Test-PrivateMarkerWindowsHost)) {
-        # hosted macOSのcold pwsh/Add-Typeもbounded total timeout内で測る。
-        # production既定値は変えず、Darwin証跡fixtureだけ30秒上限にする。
-        $nativeGateTestTimeoutMilliseconds =
-            if ($RequireMacOSNativePosixContainment) { 30000 } else { 10000 }
         # native wrapperはPowerShell 7のread-only `$IsMacOS` と
         # case-insensitiveに衝突する名前へ代入してはならない。
         $nativeWrapperSource = [IO.File]::ReadAllText($processBoundary)
@@ -3486,7 +3500,7 @@ $stream.Flush()
                         -Arguments @('-NoProfile', '-Command', 'exit 0') `
                         -WorkingDirectory $tempRoot `
                         -IsolationRoot $nativeGateFailureIsolation `
-                        -TimeoutMilliseconds $nativeGateTestTimeoutMilliseconds `
+                        -TimeoutMilliseconds $processTestTimeoutMilliseconds `
                         -ForceNativePosixSessionGate `
                         -TestOnlyNativePosixGateFailurePhase (
                             $nativeGateFailurePhase
@@ -3569,9 +3583,6 @@ $stream.Flush()
                 Add-Failure 'Expected -RequireMacOSNativePosixContainment to run on Darwin.'
             }
         }
-        $availableSetSidPath = @('/usr/bin/setsid', '/bin/setsid') |
-            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
-            Select-Object -First 1
         $posixSurvivedSentinels =
             New-Object System.Collections.Generic.List[string]
         $posixContainmentCases = @(
@@ -3694,7 +3705,7 @@ exit __EXIT_CODE__
                 -IsolationRoot (
                     Join-Path $tempRoot "posix-$gateLabel-isolation"
                 ) `
-                -TimeoutMilliseconds $nativeGateTestTimeoutMilliseconds `
+                -TimeoutMilliseconds $processTestTimeoutMilliseconds `
                 -StreamCompletionWaitMilliseconds 250 `
                 -StreamCleanupWaitMilliseconds 2000 `
                 -ForceNativePosixSessionGate:$forceNativeGate

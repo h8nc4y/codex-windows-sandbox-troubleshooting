@@ -92,7 +92,11 @@ The format loosely follows Keep a Changelog conventions.
   zero-width names, block comments, and textual decoys.
 - Classified a native gate that reaches its total deadline before publishing
   status as fixed `timeout`, and gave the macOS-only evidence fixture a
-  bounded 30-second cold-start budget without changing production defaults.
+  bounded 30-second budget for every normal process call. Native-gate hosts
+  skip only the 25-millisecond post-exit seam and five-second post-cleanup seam
+  that cold startup would preempt; the dedicated one-millisecond native
+  deadline still proves fixed timeout and residue-free cleanup. Windows,
+  Ubuntu, and production defaults are unchanged.
 - Avoided the read-only PowerShell 7 `$IsMacOS` automatic variable when
   selecting the native session library.
 - Expanded validation to a bounded Windows job covering PowerShell 7 and

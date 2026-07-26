@@ -342,9 +342,13 @@ definition hash, phase assignments, fault seams, and direct native calls use
 ordinal comparisons. Mutations hidden behind false control flow, nested
 functions/scriptblocks, sliced cleanup collections, direct final writes,
 altered phase names, or textual comments and here-strings therefore fail.
-The Darwin evidence fixture keeps its cold child startup and `Add-Type`
-compilation bounded by a 30-second test-only total deadline; production
-timeouts are unchanged.
+The Darwin evidence fixture keeps every normal process call, including cold
+child startup and `Add-Type` compilation, bounded by a 30-second test-only
+total deadline. Native-gate hosts leave the 25-millisecond post-exit seam and
+five-second post-cleanup seam to direct/external-gate hosts, while the
+dedicated one-millisecond native deadline fixture still verifies timeout
+classification and cleanup. Production and Windows/Ubuntu test timeouts are
+unchanged.
 
 The scanner, its process helper, its self-test, and the readiness validator
 contain Japanese comments and are also executed by Windows PowerShell 5.1.

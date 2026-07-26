@@ -1853,6 +1853,315 @@ function Assert-FinalScanDeadlineContract {
     }
 }
 
+function Assert-MacOSProcessFixtureBudgetContract {
+    param([string]$RelativePath)
+
+    $filePath = Get-RepoFilePath -RelativePath $RelativePath
+    if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+        Add-Failure "Cannot inspect missing file: $RelativePath (macOS process fixture budget contract)"
+        return
+    }
+    try {
+        $source = Get-RepoUtf8Text -RelativePath $RelativePath
+    }
+    catch {
+        Add-Failure "$RelativePath must be valid UTF-8 (macOS process fixture budget contract)"
+        return
+    }
+
+    # comment/string decoyを数えず、budget定義、対象call、native skip ancestorを
+    # Parser AST上の一意なassignment/parameter/offsetとして閉じる。
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+        $source,
+        [ref]$tokens,
+        [ref]$parseErrors
+    )
+    if ($parseErrors.Count -ne 0) {
+        Add-Failure "$RelativePath must parse for the macOS process fixture budget contract."
+        return
+    }
+    $getAssignment = {
+        param([string]$Name)
+
+        $matches = @(
+            $ast.FindAll(
+                {
+                    param($node)
+                    $node -is
+                        [System.Management.Automation.Language.AssignmentStatementAst] -and
+                    $node.Left -is
+                        [System.Management.Automation.Language.VariableExpressionAst] -and
+                    [string]::Equals(
+                        $node.Left.VariablePath.UserPath,
+                        $Name,
+                        [System.StringComparison]::Ordinal
+                    )
+                },
+                $true
+            )
+        )
+        if ($matches.Count -ne 1) {
+            return $null
+        }
+        return $matches[0]
+    }
+    $getParameterValue = {
+        param(
+            [System.Management.Automation.Language.CommandAst]$Command,
+            [string]$Name
+        )
+
+        for ($index = 0;
+            $index -lt $Command.CommandElements.Count;
+            $index++) {
+            $element = $Command.CommandElements[$index]
+            if ($element -is
+                    [System.Management.Automation.Language.CommandParameterAst] -and
+                [string]::Equals(
+                    $element.ParameterName,
+                    $Name,
+                    [System.StringComparison]::Ordinal
+                )) {
+                if ($index + 1 -ge $Command.CommandElements.Count -or
+                    $Command.CommandElements[$index + 1] -is
+                        [System.Management.Automation.Language.CommandParameterAst]) {
+                    return ''
+                }
+                return $Command.CommandElements[$index + 1].Extent.Text
+            }
+        }
+        return $null
+    }
+    $getProcessCommand = {
+        param(
+            [System.Management.Automation.Language.AssignmentStatementAst]
+                $Assignment
+        )
+
+        if ($null -eq $Assignment) {
+            return $null
+        }
+        $commands = @(
+            $Assignment.Right.FindAll(
+                {
+                    param($node)
+                    $node -is
+                        [System.Management.Automation.Language.CommandAst] -and
+                    [string]::Equals(
+                        $node.GetCommandName(),
+                        'Invoke-PrivateMarkerProcess',
+                        [System.StringComparison]::Ordinal
+                    )
+                },
+                $true
+            )
+        )
+        if ($commands.Count -ne 1) {
+            return $null
+        }
+        return $commands[0]
+    }
+
+    $availableSetSidAssignment = & $getAssignment 'availableSetSidPath'
+    $nativeGateHostAssignment = & $getAssignment 'usesNativePosixSessionGate'
+    $normalBudgetAssignment =
+        & $getAssignment 'processTestTimeoutMilliseconds'
+    $rawBudgetAssignment =
+        & $getAssignment 'rawTransportTestTimeoutMilliseconds'
+    $rawTransportAssignment = & $getAssignment 'rawTransportResult'
+    if ($null -eq $availableSetSidAssignment -or
+        $null -eq $nativeGateHostAssignment -or
+        $null -eq $normalBudgetAssignment -or
+        $null -eq $rawBudgetAssignment -or
+        $null -eq $rawTransportAssignment) {
+        Add-Failure "$RelativePath must define each macOS fixture gate/budget and raw transport assignment exactly once."
+        return
+    }
+
+    $normalizedSetSid =
+        $availableSetSidAssignment.Right.Extent.Text -replace '\s+', ''
+    $normalizedNativeGateHost =
+        $nativeGateHostAssignment.Right.Extent.Text -replace '\s+', ''
+    $normalizedNormalBudget =
+        $normalBudgetAssignment.Right.Extent.Text -replace '\s+', ''
+    $normalizedRawBudget =
+        $rawBudgetAssignment.Right.Extent.Text -replace '\s+', ''
+    if ($normalizedSetSid -cne
+            "@('/usr/bin/setsid','/bin/setsid')|Where-Object{Test-Path-LiteralPath`$_-PathTypeLeaf}|Select-Object-First1" -or
+        $normalizedNativeGateHost -cne
+            '-not(Test-PrivateMarkerWindowsHost)-and[string]::IsNullOrWhiteSpace([string]$availableSetSidPath)' -or
+        $normalizedNormalBudget -cne
+            'if($RequireMacOSNativePosixContainment){30000}else{10000}' -or
+        $normalizedRawBudget -cne
+            'if($RequireMacOSNativePosixContainment){30000}else{5000}') {
+        Add-Failure "$RelativePath must keep exact host detection and macOS-only 30-second fixture budgets."
+    }
+    $rawTransportOffset = $rawTransportAssignment.Extent.StartOffset
+    foreach ($setupAssignment in @(
+        $availableSetSidAssignment,
+        $nativeGateHostAssignment,
+        $normalBudgetAssignment,
+        $rawBudgetAssignment
+    )) {
+        if ($setupAssignment.Extent.StartOffset -ge $rawTransportOffset) {
+            Add-Failure "$RelativePath must establish native-gate detection and budgets before its first process fixture."
+            break
+        }
+    }
+
+    $expectedFixtureTimeouts = [ordered]@{
+        rawTransportResult = '$rawTransportTestTimeoutMilliseconds'
+        rawGitInitResult = '$processTestTimeoutMilliseconds'
+        rawGitHashResult = '$processTestTimeoutMilliseconds'
+        rawGitBatchResult = '$processTestTimeoutMilliseconds'
+        hermeticEnvironmentResult = '$processTestTimeoutMilliseconds'
+        withinBoundaryResult = '$processTestTimeoutMilliseconds'
+        overBoundaryResult = '$processTestTimeoutMilliseconds'
+        hostilePathResult = '$processTestTimeoutMilliseconds'
+        posixPipeResult = '$processTestTimeoutMilliseconds'
+    }
+    foreach ($fixtureName in $expectedFixtureTimeouts.Keys) {
+        $fixtureAssignment = & $getAssignment $fixtureName
+        $fixtureCommand = & $getProcessCommand $fixtureAssignment
+        if ($null -eq $fixtureAssignment -or
+            $null -eq $fixtureCommand -or
+            (& $getParameterValue $fixtureCommand 'TimeoutMilliseconds') -cne
+                $expectedFixtureTimeouts[$fixtureName] -or
+            $fixtureAssignment.Extent.StartOffset -le
+                $normalBudgetAssignment.Extent.StartOffset) {
+            Add-Failure "$RelativePath process fixture '$fixtureName' must use its hoisted bounded timeout."
+        }
+    }
+
+    # 25ms/5s seamはnative startupを測るfixtureではない。同一の否定guard下で
+    # literal deadlineを維持し、native deadlineは専用1ms callだけが所有する。
+    $sharedNativeGateGuardOffset = $null
+    foreach ($seamCase in @(
+        [pscustomobject]@{
+            Name = 'expiredCompletedProcessResult'
+            Timeout = '25'
+            Seam = 'TestOnlyPostExitDelayMilliseconds'
+            SeamValue = '100'
+        },
+        [pscustomobject]@{
+            Name = 'expiredAfterInitialCheckResult'
+            Timeout = '5000'
+            Seam = 'TestOnlyExpireDeadlineAfterInitialCheck'
+            SeamValue = ''
+        }
+    )) {
+        $seamAssignment = & $getAssignment $seamCase.Name
+        $seamCommand = & $getProcessCommand $seamAssignment
+        $nativeGateGuard = $null
+        $ancestor = if ($null -eq $seamAssignment) {
+            $null
+        } else {
+            $seamAssignment.Parent
+        }
+        while ($null -ne $ancestor -and $null -eq $nativeGateGuard) {
+            if ($ancestor -is
+                    [System.Management.Automation.Language.IfStatementAst] -and
+                $ancestor.Clauses.Count -eq 1 -and
+                (($ancestor.Clauses[0].Item1.Extent.Text -replace '\s+', '') -ceq
+                    '-not$usesNativePosixSessionGate')) {
+                $nativeGateGuard = $ancestor
+            }
+            $ancestor = $ancestor.Parent
+        }
+        $belongsToGuardTrueClause = $false
+        $crossesDeferredDefinition = $false
+        if ($null -ne $nativeGateGuard) {
+            $trueClause = $nativeGateGuard.Clauses[0].Item2
+            $belongsToGuardTrueClause =
+                $null -eq $nativeGateGuard.ElseClause -and
+                $seamAssignment.Extent.StartOffset -ge
+                    $trueClause.Extent.StartOffset -and
+                $seamAssignment.Extent.EndOffset -le
+                    $trueClause.Extent.EndOffset
+            $ancestor = $seamAssignment.Parent
+            while ($null -ne $ancestor -and
+                $ancestor -ne $nativeGateGuard) {
+                if ($ancestor -is
+                        [System.Management.Automation.Language.FunctionDefinitionAst] -or
+                    $ancestor -is
+                        [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+                    $crossesDeferredDefinition = $true
+                    break
+                }
+                $ancestor = $ancestor.Parent
+            }
+            if ($null -eq $sharedNativeGateGuardOffset) {
+                $sharedNativeGateGuardOffset =
+                    $nativeGateGuard.Extent.StartOffset
+            } elseif ($sharedNativeGateGuardOffset -ne
+                $nativeGateGuard.Extent.StartOffset) {
+                $belongsToGuardTrueClause = $false
+            }
+        }
+        if ($null -eq $seamAssignment -or
+            $null -eq $seamCommand -or
+            (& $getParameterValue $seamCommand 'TimeoutMilliseconds') -cne
+                $seamCase.Timeout -or
+            (& $getParameterValue $seamCommand $seamCase.Seam) -cne
+                $seamCase.SeamValue -or
+            -not $belongsToGuardTrueClause -or
+            $crossesDeferredDefinition) {
+            Add-Failure "$RelativePath post-exit seam '$($seamCase.Name)' must retain its literal deadline under the native-gate-host skip."
+        }
+    }
+
+    $processCommands = @(
+        $ast.FindAll(
+            {
+                param($node)
+                $node -is
+                    [System.Management.Automation.Language.CommandAst] -and
+                [string]::Equals(
+                    $node.GetCommandName(),
+                    'Invoke-PrivateMarkerProcess',
+                    [System.StringComparison]::Ordinal
+                )
+            },
+            $true
+        )
+    )
+    $phaseFaultCommands = @(
+        $processCommands |
+            Where-Object {
+                $null -ne (
+                    & $getParameterValue `
+                        $_ `
+                        'TestOnlyNativePosixGateFailurePhase'
+                )
+            }
+    )
+    $nativeDeadlineCommands = @(
+        $processCommands |
+            Where-Object {
+                (& $getParameterValue $_ 'IsolationRoot') -ceq
+                    '$nativeGateDeadlineIsolation'
+            }
+    )
+    if ($phaseFaultCommands.Count -ne 1 -or
+        (& $getParameterValue `
+            $phaseFaultCommands[0] `
+            'TimeoutMilliseconds') -cne
+                '$processTestTimeoutMilliseconds') {
+        Add-Failure "$RelativePath native phase-fault fixture must use the hoisted normal process budget."
+    }
+    if ($nativeDeadlineCommands.Count -ne 1 -or
+        (& $getParameterValue `
+            $nativeDeadlineCommands[0] `
+            'TimeoutMilliseconds') -cne '1') {
+        Add-Failure "$RelativePath must retain one literal one-millisecond native deadline cleanup fixture."
+    }
+    if ($source -cmatch '\$nativeGateTestTimeoutMilliseconds') {
+        Add-Failure "$RelativePath must not reintroduce the late native-gate timeout budget."
+    }
+}
+
 function Get-WorkflowJobLines {
     param(
         [string]$RelativePath,
@@ -3122,6 +3431,7 @@ Assert-FileContains -RelativePath 'scripts/test-scan-private-markers.ps1' -Patte
 Assert-FileContains -RelativePath 'scripts/test-scan-private-markers.ps1' -Pattern 'post-exit delay deadline' -Description 'already-exited process deadline regression'
 Assert-FileContains -RelativePath 'scripts/test-scan-private-markers.ps1' -Pattern 'post-stream cleanup deadline' -Description 'post-cleanup process deadline regression'
 Assert-FileContains -RelativePath 'scripts/test-scan-private-markers.ps1' -Pattern 'native-gate-deadline' -Description 'native gate timeout and late-ready cleanup regression'
+Assert-MacOSProcessFixtureBudgetContract -RelativePath 'scripts/test-scan-private-markers.ps1'
 Assert-FileContains -RelativePath 'scripts/test-scan-private-markers.ps1' -Pattern 'process timeout clock to own launch' -Description 'process launch and success deadline source-order regression'
 Assert-FileMatchCount -RelativePath 'scripts/scan-private-markers.ps1' -Pattern '(?m)^\s*Assert-GitIndexSnapshotsUnchanged\s*$' -ExpectedCount 2 -Description 'pre- and post-content raw index snapshot verification'
 Assert-FileContains -RelativePath 'scripts/test-scan-private-markers.ps1' -Pattern 'exactly three raw stage listings' -Description 'post-content index mutation regression'
