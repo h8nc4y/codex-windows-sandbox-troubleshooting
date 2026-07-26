@@ -144,6 +144,1611 @@ function Assert-FileHasUtf8Bom {
     }
 }
 
+function Test-NativePosixGateWrapperContract {
+    param([string]$Source)
+
+    $ordinal = [System.StringComparison]::Ordinal
+    $equalsOrdinal = {
+        param($Actual, [string]$Expected)
+        return [string]::Equals(
+            [string]$Actual,
+            $Expected,
+            $ordinal
+        )
+    }
+    $nearestFunctionOwner = {
+        param($Node)
+        $cursor = $Node.Parent
+        while ($null -ne $cursor) {
+            if ($cursor -is
+                [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+                return $null
+            }
+            if ($cursor -is
+                [System.Management.Automation.Language.FunctionDefinitionAst]) {
+                return $cursor
+            }
+            $cursor = $cursor.Parent
+        }
+        return $null
+    }
+    $directInvocation = {
+        param($Statement)
+        if ($Statement -isnot
+            [System.Management.Automation.Language.PipelineAst] -or
+            $Statement.PipelineElements.Count -ne 1) {
+            return $null
+        }
+        $commandExpression = $Statement.PipelineElements[0]
+        if ($commandExpression -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+            $commandExpression.Expression -isnot
+                [System.Management.Automation.Language.InvokeMemberExpressionAst]) {
+            return $null
+        }
+        return $commandExpression.Expression
+    }
+    $variableName = {
+        param($Ast, [string]$Expected)
+        return (
+            $Ast -is
+                [System.Management.Automation.Language.VariableExpressionAst] -and
+            (& $equalsOrdinal $Ast.VariablePath.UserPath $Expected)
+        )
+    }
+    $base64AssignmentContract = {
+        param(
+            $Assignment,
+            [string]$TargetVariable,
+            [string]$SourceVariable
+        )
+        if ($Assignment -isnot
+            [System.Management.Automation.Language.AssignmentStatementAst] -or
+            -not (& $variableName $Assignment.Left $TargetVariable) -or
+            $Assignment.Right -isnot
+                [System.Management.Automation.Language.CommandExpressionAst] -or
+            $Assignment.Right.Expression -isnot
+                [System.Management.Automation.Language.InvokeMemberExpressionAst]) {
+            return $false
+        }
+        $base64Call = $Assignment.Right.Expression
+        if (-not $base64Call.Static -or
+            $base64Call.Expression -isnot
+                [System.Management.Automation.Language.TypeExpressionAst] -or
+            -not (& $equalsOrdinal $base64Call.Expression.TypeName.FullName 'Convert') -or
+            -not (& $equalsOrdinal $base64Call.Member.Value 'ToBase64String') -or
+            $base64Call.Arguments.Count -ne 1 -or
+            $base64Call.Arguments[0] -isnot
+                [System.Management.Automation.Language.InvokeMemberExpressionAst]) {
+            return $false
+        }
+        $getBytesCall = $base64Call.Arguments[0]
+        if ($getBytesCall.Static -or
+            -not (& $equalsOrdinal $getBytesCall.Member.Value 'GetBytes') -or
+            $getBytesCall.Arguments.Count -ne 1 -or
+            -not (& $variableName $getBytesCall.Arguments[0] $SourceVariable) -or
+            $getBytesCall.Expression -isnot
+                [System.Management.Automation.Language.MemberExpressionAst]) {
+            return $false
+        }
+        $utf8Property = $getBytesCall.Expression
+        return (
+            $utf8Property.Static -and
+            $utf8Property.Expression -is
+                [System.Management.Automation.Language.TypeExpressionAst] -and
+            (& $equalsOrdinal $utf8Property.Expression.TypeName.FullName 'System.Text.Encoding') -and
+            (& $equalsOrdinal $utf8Property.Member.Value 'UTF8')
+        )
+    }
+    $base64DecodeAssignmentContract = {
+        param(
+            $Assignment,
+            [string]$TargetVariable,
+            [string]$Placeholder
+        )
+        if ($Assignment -isnot
+            [System.Management.Automation.Language.AssignmentStatementAst] -or
+            -not (& $variableName $Assignment.Left $TargetVariable) -or
+            $Assignment.Right -isnot
+                [System.Management.Automation.Language.CommandExpressionAst] -or
+            $Assignment.Right.Expression -isnot
+                [System.Management.Automation.Language.InvokeMemberExpressionAst]) {
+            return $false
+        }
+        $getStringCall = $Assignment.Right.Expression
+        if ($getStringCall.Static -or
+            -not (& $equalsOrdinal $getStringCall.Member.Value 'GetString') -or
+            $getStringCall.Arguments.Count -ne 1 -or
+            $getStringCall.Expression -isnot
+                [System.Management.Automation.Language.MemberExpressionAst]) {
+            return $false
+        }
+        $utf8Property = $getStringCall.Expression
+        if (-not $utf8Property.Static -or
+            $utf8Property.Expression -isnot
+                [System.Management.Automation.Language.TypeExpressionAst] -or
+            -not (& $equalsOrdinal $utf8Property.Expression.TypeName.FullName 'Text.Encoding') -or
+            -not (& $equalsOrdinal $utf8Property.Member.Value 'UTF8') -or
+            $getStringCall.Arguments[0] -isnot
+                [System.Management.Automation.Language.InvokeMemberExpressionAst]) {
+            return $false
+        }
+        $decodeCall = $getStringCall.Arguments[0]
+        return (
+            $decodeCall.Static -and
+            $decodeCall.Expression -is
+                [System.Management.Automation.Language.TypeExpressionAst] -and
+            (& $equalsOrdinal $decodeCall.Expression.TypeName.FullName 'Convert') -and
+            (& $equalsOrdinal $decodeCall.Member.Value 'FromBase64String') -and
+            $decodeCall.Arguments.Count -eq 1 -and
+            $decodeCall.Arguments[0] -is
+                [System.Management.Automation.Language.StringConstantExpressionAst] -and
+            (& $equalsOrdinal $decodeCall.Arguments[0].Value $Placeholder)
+        )
+    }
+
+    # outer sourceもParser ASTを正本にし、comment内のwrapper/cleanup decoyを拒否する。
+    $sourceTokens = $null
+    $sourceParseErrors = $null
+    $sourceAst =
+        [System.Management.Automation.Language.Parser]::ParseInput(
+            $Source,
+            [ref]$sourceTokens,
+            [ref]$sourceParseErrors
+        )
+    if ($sourceParseErrors.Count -ne 0) {
+        return $false
+    }
+    $processFunctions = @(
+        $sourceAst.FindAll(
+            {
+                param($node)
+                $node -is
+                    [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                [string]::Equals(
+                    $node.Name,
+                    'Invoke-PrivateMarkerProcess',
+                    [System.StringComparison]::Ordinal
+                )
+            },
+            $true
+        )
+    )
+    if ($processFunctions.Count -ne 1 -or
+        [System.Array]::IndexOf(
+            @($sourceAst.EndBlock.Statements),
+            $processFunctions[0]
+        ) -lt 0) {
+        return $false
+    }
+    $processFunction = $processFunctions[0]
+
+    $wrapperAssignments = @(
+        $sourceAst.FindAll(
+            {
+                param($node)
+                $node -is
+                    [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                [string]::Equals(
+                    $node.Left.VariablePath.UserPath,
+                    'posixWrapperTemplate',
+                    [System.StringComparison]::Ordinal
+                )
+            },
+            $true
+        ) |
+            Where-Object {
+                [object]::ReferenceEquals(
+                    (& $nearestFunctionOwner $_),
+                    $processFunction
+                )
+            }
+    )
+    if ($wrapperAssignments.Count -ne 1) {
+        return $false
+    }
+    $wrapperAssignment = $wrapperAssignments[0]
+    if ($wrapperAssignment.Right -isnot
+        [System.Management.Automation.Language.CommandExpressionAst] -or
+        $wrapperAssignment.Right.Expression -isnot
+            [System.Management.Automation.Language.StringConstantExpressionAst] -or
+        $wrapperAssignment.Right.Expression.StringConstantType -ne
+            [System.Management.Automation.Language.StringConstantType]::SingleQuotedHereString) {
+        return $false
+    }
+    $wrapperBlock = $wrapperAssignment.Parent
+    $wrapperBlockStatements = @($wrapperBlock.Statements)
+    $wrapperIndex =
+        [System.Array]::IndexOf(
+            $wrapperBlockStatements,
+            $wrapperAssignment
+        )
+    if ($wrapperBlock -isnot
+        [System.Management.Automation.Language.StatementBlockAst] -or
+        $wrapperIndex -lt 1 -or
+        $wrapperIndex -ge ($wrapperBlockStatements.Count - 1) -or
+        $wrapperBlockStatements[$wrapperIndex - 1] -isnot
+            [System.Management.Automation.Language.AssignmentStatementAst] -or
+        -not (& $variableName $wrapperBlockStatements[$wrapperIndex - 1].Left 'testOnlyFailurePhaseBase64') -or
+        $wrapperBlockStatements[$wrapperIndex + 1] -isnot
+            [System.Management.Automation.Language.AssignmentStatementAst] -or
+        -not (& $variableName $wrapperBlockStatements[$wrapperIndex + 1].Left 'posixWrapperScript')) {
+        return $false
+    }
+    $wrapperScriptAssignment =
+        $wrapperBlockStatements[$wrapperIndex + 1]
+
+    # wrapper生成sequenceを実行される既知のelse/try経路へ固定する。
+    # if(false)、loop、switch、nested try等でtextだけ残す変異を拒否する。
+    $nativeGateChoiceIf = $wrapperBlock.Parent
+    $posixHostElseBlock = $nativeGateChoiceIf.Parent
+    $posixHostIf = $posixHostElseBlock.Parent
+    $processTryBlock = $posixHostIf.Parent
+    $processTry = $processTryBlock.Parent
+    if ($nativeGateChoiceIf -isnot
+        [System.Management.Automation.Language.IfStatementAst] -or
+        -not [object]::ReferenceEquals(
+            $nativeGateChoiceIf.ElseClause,
+            $wrapperBlock
+        ) -or
+        $posixHostElseBlock -isnot
+            [System.Management.Automation.Language.StatementBlockAst] -or
+        $posixHostIf -isnot
+            [System.Management.Automation.Language.IfStatementAst] -or
+        -not [object]::ReferenceEquals(
+            $posixHostIf.ElseClause,
+            $posixHostElseBlock
+        ) -or
+        [System.Array]::IndexOf(
+            @($posixHostElseBlock.Statements),
+            $nativeGateChoiceIf
+        ) -lt 0 -or
+        $processTryBlock -isnot
+            [System.Management.Automation.Language.StatementBlockAst] -or
+        $processTry -isnot
+            [System.Management.Automation.Language.TryStatementAst] -or
+        -not [object]::ReferenceEquals($processTry.Body, $processTryBlock) -or
+        [System.Array]::IndexOf(
+            @($processTryBlock.Statements),
+            $posixHostIf
+        ) -lt 0 -or
+        -not [object]::ReferenceEquals(
+            $processTry.Parent,
+            $processFunction.Body.EndBlock
+        ) -or
+        [System.Array]::IndexOf(
+            @($processFunction.Body.EndBlock.Statements),
+            $processTry
+        ) -lt 0) {
+        return $false
+    }
+
+    # 6個のbase64 source assignmentをwrapper直前のexact sequenceとして固定する。
+    $expectedBase64Assignments = @(
+        [pscustomobject]@{ Target = 'payloadBase64'; Source = 'payloadJson' }
+        [pscustomobject]@{
+            Target = 'readyPathBase64'
+            Source = 'posixGateReadyPath'
+        }
+        [pscustomobject]@{
+            Target = 'releasePathBase64'
+            Source = 'posixGateReleasePath'
+        }
+        [pscustomobject]@{
+            Target = 'statusPathBase64'
+            Source = 'posixGateStatusPath'
+        }
+        [pscustomobject]@{
+            Target = 'statusStagingPathBase64'
+            Source = 'posixGateStatusStagingPath'
+        }
+        [pscustomobject]@{
+            Target = 'testOnlyFailurePhaseBase64'
+            Source = 'TestOnlyNativePosixGateFailurePhase'
+        }
+    )
+    if ($wrapperIndex -lt $expectedBase64Assignments.Count) {
+        return $false
+    }
+    for ($base64Index = 0;
+        $base64Index -lt $expectedBase64Assignments.Count;
+        $base64Index++) {
+        $base64StatementIndex =
+            $wrapperIndex - $expectedBase64Assignments.Count + $base64Index
+        if (-not (& $base64AssignmentContract $wrapperBlockStatements[$base64StatementIndex] $expectedBase64Assignments[$base64Index].Target $expectedBase64Assignments[$base64Index].Source)) {
+            return $false
+        }
+    }
+
+    # successor RHSは6段のString.Replace chainだけを許可する。
+    $replacePairs = @(
+        [pscustomobject]@{
+            Placeholder = '__PAYLOAD__'
+            Source = 'payloadBase64'
+        }
+        [pscustomobject]@{
+            Placeholder = '__TEST_ONLY_FAILURE_PHASE__'
+            Source = 'testOnlyFailurePhaseBase64'
+        }
+        [pscustomobject]@{
+            Placeholder = '__STATUS_STAGING_PATH__'
+            Source = 'statusStagingPathBase64'
+        }
+        [pscustomobject]@{
+            Placeholder = '__STATUS_PATH__'
+            Source = 'statusPathBase64'
+        }
+        [pscustomobject]@{
+            Placeholder = '__RELEASE_PATH__'
+            Source = 'releasePathBase64'
+        }
+        [pscustomobject]@{
+            Placeholder = '__READY_PATH__'
+            Source = 'readyPathBase64'
+        }
+    )
+    if ($wrapperScriptAssignment.Right -isnot
+        [System.Management.Automation.Language.CommandExpressionAst]) {
+        return $false
+    }
+    $replaceCursor = $wrapperScriptAssignment.Right.Expression
+    foreach ($replacePair in $replacePairs) {
+        if ($replaceCursor -isnot
+            [System.Management.Automation.Language.InvokeMemberExpressionAst] -or
+            $replaceCursor.Static -or
+            -not (& $equalsOrdinal $replaceCursor.Member.Value 'Replace') -or
+            $replaceCursor.Arguments.Count -ne 2 -or
+            $replaceCursor.Arguments[0] -isnot
+                [System.Management.Automation.Language.StringConstantExpressionAst] -or
+            -not (& $equalsOrdinal $replaceCursor.Arguments[0].Value $replacePair.Placeholder) -or
+            -not (& $variableName $replaceCursor.Arguments[1] $replacePair.Source)) {
+            return $false
+        }
+        $replaceCursor = $replaceCursor.Expression
+    }
+    if (-not (& $variableName $replaceCursor 'posixWrapperTemplate')) {
+        return $false
+    }
+    $wrapper = $wrapperAssignment.Right.Expression.Value
+
+    $cleanupForEachAsts = @(
+        $sourceAst.FindAll(
+            {
+                param($node)
+                $node -is
+                    [System.Management.Automation.Language.ForEachStatementAst] -and
+                [string]::Equals(
+                    $node.Variable.VariablePath.UserPath,
+                    'gatePath',
+                    [System.StringComparison]::Ordinal
+                )
+            },
+            $true
+        ) |
+            Where-Object {
+                [object]::ReferenceEquals(
+                    (& $nearestFunctionOwner $_),
+                    $processFunction
+                )
+            }
+    )
+    if ($cleanupForEachAsts.Count -ne 1) {
+        return $false
+    }
+    $cleanupForEach = $cleanupForEachAsts[0]
+    $cleanupBlock = $cleanupForEach.Parent
+    $cleanupTry = $cleanupBlock.Parent
+    # cleanup collectionは @(<exact 4 variables>) というAST shape自体を固定する。
+    # 変数をtext上に残したままindex/range/wrapperで実行対象から落とす変異を許さない。
+    $cleanupCondition = $cleanupForEach.Condition
+    if ($cleanupCondition -isnot
+        [System.Management.Automation.Language.PipelineAst] -or
+        $cleanupCondition.PipelineElements.Count -ne 1 -or
+        $cleanupCondition.PipelineElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $cleanupCondition.PipelineElements[0].Expression -isnot
+            [System.Management.Automation.Language.ArrayExpressionAst]) {
+        return $false
+    }
+    $cleanupArrayExpression =
+        $cleanupCondition.PipelineElements[0].Expression
+    $cleanupArrayStatements =
+        @($cleanupArrayExpression.SubExpression.Statements)
+    if ($cleanupArrayStatements.Count -ne 1 -or
+        $cleanupArrayStatements[0] -isnot
+            [System.Management.Automation.Language.PipelineAst] -or
+        $cleanupArrayStatements[0].PipelineElements.Count -ne 1 -or
+        $cleanupArrayStatements[0].PipelineElements[0] -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $cleanupArrayStatements[0].PipelineElements[0].Expression -isnot
+            [System.Management.Automation.Language.ArrayLiteralAst]) {
+        return $false
+    }
+    $cleanupVariables = @(
+        $cleanupArrayStatements[0].PipelineElements[0].Expression.Elements
+    )
+    $expectedCleanupVariables = @(
+        'posixGateReadyPath',
+        'posixGateReleasePath',
+        'posixGateStatusPath',
+        'posixGateStatusStagingPath'
+    )
+    if ($cleanupBlock -isnot
+        [System.Management.Automation.Language.StatementBlockAst] -or
+        $cleanupTry -isnot
+            [System.Management.Automation.Language.TryStatementAst] -or
+        -not [object]::ReferenceEquals($cleanupTry, $processTry) -or
+        -not [object]::ReferenceEquals(
+            $cleanupTry.Finally,
+            $cleanupBlock
+        ) -or
+        [System.Array]::IndexOf(
+            @($cleanupBlock.Statements),
+            $cleanupForEach
+        ) -ne ($cleanupBlock.Statements.Count - 1) -or
+        $cleanupVariables.Count -ne $expectedCleanupVariables.Count) {
+        return $false
+    }
+    for ($cleanupIndex = 0;
+        $cleanupIndex -lt $expectedCleanupVariables.Count;
+        $cleanupIndex++) {
+        if ($cleanupVariables[$cleanupIndex] -isnot
+            [System.Management.Automation.Language.VariableExpressionAst]) {
+            return $false
+        }
+        if (-not (& $equalsOrdinal $cleanupVariables[$cleanupIndex].VariablePath.UserPath $expectedCleanupVariables[$cleanupIndex])) {
+            return $false
+        }
+    }
+
+    # cleanup bodyもguard -> try -> direct Delete -> empty catchだけへ閉じる。
+    $cleanupBodyStatements = @($cleanupForEach.Body.Statements)
+    if ($cleanupBodyStatements.Count -ne 1 -or
+        $cleanupBodyStatements[0] -isnot
+            [System.Management.Automation.Language.IfStatementAst]) {
+        return $false
+    }
+    $cleanupGuard = $cleanupBodyStatements[0]
+    if ($cleanupGuard.Clauses.Count -ne 1 -or
+        $null -ne $cleanupGuard.ElseClause -or
+        -not (& $equalsOrdinal $cleanupGuard.Clauses[0].Item1.Extent.Text '-not [string]::IsNullOrWhiteSpace($gatePath)') -or
+        $cleanupGuard.Clauses[0].Item2.Statements.Count -ne 1 -or
+        $cleanupGuard.Clauses[0].Item2.Statements[0] -isnot
+            [System.Management.Automation.Language.TryStatementAst]) {
+        return $false
+    }
+    $cleanupDeleteTry = $cleanupGuard.Clauses[0].Item2.Statements[0]
+    if ($cleanupDeleteTry.Body.Statements.Count -ne 1 -or
+        $cleanupDeleteTry.CatchClauses.Count -ne 1 -or
+        $cleanupDeleteTry.CatchClauses[0].Body.Statements.Count -ne 0 -or
+        $null -ne $cleanupDeleteTry.Finally) {
+        return $false
+    }
+    $cleanupDelete = & $directInvocation $cleanupDeleteTry.Body.Statements[0]
+    if ($null -eq $cleanupDelete -or
+        -not $cleanupDelete.Static -or
+        $cleanupDelete.Expression -isnot
+            [System.Management.Automation.Language.TypeExpressionAst] -or
+        -not (& $equalsOrdinal $cleanupDelete.Expression.TypeName.FullName 'System.IO.File') -or
+        -not (& $equalsOrdinal $cleanupDelete.Member.Value 'Delete') -or
+        $cleanupDelete.Arguments.Count -ne 1 -or
+        -not (& $variableName $cleanupDelete.Arguments[0] 'gatePath')) {
+        return $false
+    }
+
+    # embedded wrapperもParser ASTでparseし、実行scopeと親statementを閉じる。
+    $wrapperTokens = $null
+    $wrapperParseErrors = $null
+    $wrapperAst =
+        [System.Management.Automation.Language.Parser]::ParseInput(
+            $wrapper,
+            [ref]$wrapperTokens,
+            [ref]$wrapperParseErrors
+        )
+    if ($wrapperParseErrors.Count -ne 0) {
+        return $false
+    }
+    $statusFunctions = @(
+        $wrapperAst.FindAll(
+            {
+                param($node)
+                $node -is
+                    [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                [string]::Equals(
+                    $node.Name,
+                    'Write-NativeGateStatus',
+                    [System.StringComparison]::Ordinal
+                )
+            },
+            $true
+        )
+    )
+    if ($statusFunctions.Count -ne 1 -or
+        [System.Array]::IndexOf(
+            @($wrapperAst.EndBlock.Statements),
+            $statusFunctions[0]
+        ) -lt 0) {
+        return $false
+    }
+    $statusFunction = $statusFunctions[0]
+    $statusParameters = @($statusFunction.Parameters)
+    $statusCleanBlockProperty =
+        $statusFunction.Body.PSObject.Properties['CleanBlock']
+    $statusCleanBlock = if ($null -eq $statusCleanBlockProperty) {
+        $null
+    } else {
+        $statusCleanBlockProperty.Value
+    }
+    if ($null -ne $statusFunction.Body.ParamBlock -or
+        $null -ne $statusFunction.Body.DynamicParamBlock -or
+        $null -ne $statusFunction.Body.BeginBlock -or
+        $null -ne $statusFunction.Body.ProcessBlock -or
+        $null -ne $statusCleanBlock -or
+        $null -eq $statusFunction.Body.EndBlock -or
+        $statusParameters.Count -ne 1 -or
+        -not (& $variableName $statusParameters[0].Name 'Status') -or
+        $null -ne $statusParameters[0].DefaultValue -or
+        $statusParameters[0].Attributes.Count -ne 1 -or
+        $statusParameters[0].Attributes[0] -isnot
+            [System.Management.Automation.Language.TypeConstraintAst] -or
+        -not (& $equalsOrdinal $statusParameters[0].Attributes[0].TypeName.FullName 'string')) {
+        return $false
+    }
+    $statusFunctionStatements =
+        @($statusFunction.Body.EndBlock.Statements)
+    if ($statusFunctionStatements.Count -ne 1 -or
+        $statusFunctionStatements[0] -isnot
+            [System.Management.Automation.Language.TryStatementAst]) {
+        return $false
+    }
+    $statusTry = $statusFunctionStatements[0]
+    $statusTryStatements = @($statusTry.Body.Statements)
+    if ($statusTryStatements.Count -ne 2 -or
+        $statusTry.CatchClauses.Count -ne 1 -or
+        $statusTry.CatchClauses[0].CatchTypes.Count -ne 0 -or
+        $null -ne $statusTry.Finally) {
+        return $false
+    }
+    $statusWrite = & $directInvocation $statusTryStatements[0]
+    $statusMove = & $directInvocation $statusTryStatements[1]
+    if ($null -eq $statusWrite -or
+        $null -eq $statusMove -or
+        -not (& $equalsOrdinal $statusWrite.Expression.TypeName.FullName 'IO.File') -or
+        -not (& $equalsOrdinal $statusWrite.Member.Value 'WriteAllText') -or
+        $statusWrite.Arguments.Count -ne 3 -or
+        -not (& $variableName $statusWrite.Arguments[0] 'statusStagingPath') -or
+        -not (& $variableName $statusWrite.Arguments[1] 'Status') -or
+        -not (& $equalsOrdinal $statusWrite.Arguments[2].Extent.Text '[Text.UTF8Encoding]::new($false)') -or
+        -not (& $equalsOrdinal $statusMove.Expression.TypeName.FullName 'IO.File') -or
+        -not (& $equalsOrdinal $statusMove.Member.Value 'Move') -or
+        $statusMove.Arguments.Count -ne 2 -or
+        -not (& $variableName $statusMove.Arguments[0] 'statusStagingPath') -or
+        -not (& $variableName $statusMove.Arguments[1] 'statusPath')) {
+        return $false
+    }
+
+    # status functionのcatchもstaging Exists/Deleteだけに閉じる。
+    $statusCatchStatements =
+        @($statusTry.CatchClauses[0].Body.Statements)
+    if ($statusCatchStatements.Count -ne 1 -or
+        $statusCatchStatements[0] -isnot
+            [System.Management.Automation.Language.TryStatementAst]) {
+        return $false
+    }
+    $statusCleanupTry = $statusCatchStatements[0]
+    $statusCleanupStatements =
+        @($statusCleanupTry.Body.Statements)
+    if ($statusCleanupStatements.Count -ne 1 -or
+        $statusCleanupStatements[0] -isnot
+            [System.Management.Automation.Language.IfStatementAst] -or
+        $statusCleanupTry.CatchClauses.Count -ne 1 -or
+        $statusCleanupTry.CatchClauses[0].CatchTypes.Count -ne 0 -or
+        $statusCleanupTry.CatchClauses[0].Body.Statements.Count -ne 0 -or
+        $null -ne $statusCleanupTry.Finally) {
+        return $false
+    }
+    $statusCleanupIf = $statusCleanupStatements[0]
+    if ($statusCleanupIf.Clauses.Count -ne 1 -or
+        $null -ne $statusCleanupIf.ElseClause -or
+        $statusCleanupIf.Clauses[0].Item2.Statements.Count -ne 1) {
+        return $false
+    }
+    $statusExists = & $directInvocation $statusCleanupIf.Clauses[0].Item1
+    $statusDelete = & $directInvocation $statusCleanupIf.Clauses[0].Item2.Statements[0]
+    if ($null -eq $statusExists -or
+        -not $statusExists.Static -or
+        $statusExists.Expression -isnot
+            [System.Management.Automation.Language.TypeExpressionAst] -or
+        -not (& $equalsOrdinal $statusExists.Expression.TypeName.FullName 'IO.File') -or
+        -not (& $equalsOrdinal $statusExists.Member.Value 'Exists') -or
+        $statusExists.Arguments.Count -ne 1 -or
+        -not (& $variableName $statusExists.Arguments[0] 'statusStagingPath') -or
+        $null -eq $statusDelete -or
+        -not (& $equalsOrdinal $statusDelete.Expression.TypeName.FullName 'IO.File') -or
+        -not (& $equalsOrdinal $statusDelete.Member.Value 'Delete') -or
+        $statusDelete.Arguments.Count -ne 1 -or
+        -not (& $variableName $statusDelete.Arguments[0] 'statusStagingPath')) {
+        return $false
+    }
+
+    # wrapper全体のfilesystem callを6個の既知operationだけへ閉じる。
+    $fileInvocations = @(
+        $wrapperAst.FindAll(
+            {
+                param($node)
+                $node -is
+                    [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+                $node.Expression -is
+                    [System.Management.Automation.Language.TypeExpressionAst] -and
+                (
+                    [string]::Equals(
+                        $node.Expression.TypeName.FullName,
+                        'IO.File',
+                        [System.StringComparison]::Ordinal
+                    ) -or
+                    [string]::Equals(
+                        $node.Expression.TypeName.FullName,
+                        'System.IO.File',
+                        [System.StringComparison]::Ordinal
+                    )
+                )
+            },
+            $true
+        )
+    )
+    if ($fileInvocations.Count -ne 6) {
+        return $false
+    }
+    $fileInvocationKeys =
+        [System.Collections.Generic.Dictionary[string, int]]::new(
+            [System.StringComparer]::Ordinal
+        )
+    foreach ($fileInvocation in $fileInvocations) {
+        if (-not (& $equalsOrdinal $fileInvocation.Expression.TypeName.FullName 'IO.File') -or
+            $fileInvocation.Arguments.Count -lt 1 -or
+            $fileInvocation.Arguments[0] -isnot
+                [System.Management.Automation.Language.VariableExpressionAst]) {
+            return $false
+        }
+        $fileKey = (
+            [string]$fileInvocation.Member.Value + ':' +
+            [string]$fileInvocation.Arguments[0].VariablePath.UserPath
+        )
+        if ($fileInvocationKeys.ContainsKey($fileKey)) {
+            $fileInvocationKeys[$fileKey]++
+        } else {
+            $fileInvocationKeys[$fileKey] = 1
+        }
+    }
+    $expectedFileInvocationKeys = @(
+        'WriteAllText:statusStagingPath'
+        'Move:statusStagingPath'
+        'Exists:statusStagingPath'
+        'Delete:statusStagingPath'
+        'WriteAllText:readyPath'
+        'Exists:releasePath'
+    )
+    if ($fileInvocationKeys.Count -ne
+        $expectedFileInvocationKeys.Count) {
+        return $false
+    }
+    foreach ($expectedFileKey in $expectedFileInvocationKeys) {
+        if (-not $fileInvocationKeys.ContainsKey($expectedFileKey) -or
+            $fileInvocationKeys[$expectedFileKey] -ne 1) {
+            return $false
+        }
+    }
+
+    # phase assignmentはOrdinal名でexact3件。zero-width変数は別物として拒否する。
+    $phaseAssignmentAsts = @(
+        $wrapperAst.FindAll(
+            {
+                param($node)
+                $node -is
+                    [System.Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Left -is
+                    [System.Management.Automation.Language.VariableExpressionAst] -and
+                [string]::Equals(
+                    $node.Left.VariablePath.UserPath,
+                    'nativeGatePhase',
+                    [System.StringComparison]::Ordinal
+                )
+            },
+            $true
+        ) |
+            Sort-Object { $_.Extent.StartOffset }
+    )
+    if ($phaseAssignmentAsts.Count -ne 3) {
+        return $false
+    }
+    $expectedPhases = @(
+        'type-definition',
+        'platform-detection',
+        'native-invocation'
+    )
+    for ($phaseIndex = 0;
+        $phaseIndex -lt $expectedPhases.Count;
+        $phaseIndex++) {
+        $phaseRight = $phaseAssignmentAsts[$phaseIndex].Right
+        if ($phaseRight -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+            $phaseRight.Expression -isnot
+                [System.Management.Automation.Language.StringConstantExpressionAst] -or
+            -not (& $equalsOrdinal $phaseRight.Expression.Value $expectedPhases[$phaseIndex])) {
+            return $false
+        }
+    }
+
+    $phaseFaultIfAsts = @(
+        $wrapperAst.FindAll(
+            {
+                param($node)
+                $node -is
+                    [System.Management.Automation.Language.IfStatementAst] -and
+                $node.Extent.Text -cmatch (
+                    '(?s)^if \(\$testOnlyNativeGateFailurePhase -ceq ' +
+                    '\$nativeGatePhase\) \{\s*' +
+                    "throw 'Synthetic native POSIX gate phase failure\.'\s*" +
+                    '\}$'
+                )
+            },
+            $true
+        ) |
+            Sort-Object { $_.Extent.StartOffset }
+    )
+    if ($phaseFaultIfAsts.Count -ne 3) {
+        return $false
+    }
+
+    $topLevelStatements = @($wrapperAst.EndBlock.Statements)
+    $topLevelTrys = @(
+        $topLevelStatements |
+            Where-Object {
+                $_ -is
+                    [System.Management.Automation.Language.TryStatementAst]
+            }
+    )
+    if ($topLevelTrys.Count -ne 1) {
+        return $false
+    }
+    $nativeTry = $topLevelTrys[0]
+    if ($topLevelStatements.Count -ne 8 -or
+        $topLevelStatements[0] -isnot
+            [System.Management.Automation.Language.PipelineAst] -or
+        -not (& $equalsOrdinal $topLevelStatements[0].Extent.Text 'Set-StrictMode -Version Latest') -or
+        $topLevelStatements[1] -isnot
+            [System.Management.Automation.Language.AssignmentStatementAst] -or
+        -not (& $variableName $topLevelStatements[1].Left 'ErrorActionPreference') -or
+        $topLevelStatements[1].Right -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $topLevelStatements[1].Right.Expression -isnot
+            [System.Management.Automation.Language.StringConstantExpressionAst] -or
+        -not (& $equalsOrdinal $topLevelStatements[1].Right.Expression.Value 'Stop') -or
+        -not (& $base64DecodeAssignmentContract $topLevelStatements[2] 'statusPath' '__STATUS_PATH__') -or
+        -not (& $base64DecodeAssignmentContract $topLevelStatements[3] 'statusStagingPath' '__STATUS_STAGING_PATH__') -or
+        -not (& $base64DecodeAssignmentContract $topLevelStatements[4] 'testOnlyNativeGateFailurePhase' '__TEST_ONLY_FAILURE_PHASE__') -or
+        -not [object]::ReferenceEquals(
+            $topLevelStatements[5],
+            $statusFunction
+        ) -or
+        -not [object]::ReferenceEquals(
+            $topLevelStatements[6],
+            $phaseAssignmentAsts[0]
+        ) -or
+        -not [object]::ReferenceEquals(
+            $topLevelStatements[7],
+            $nativeTry
+        )) {
+        return $false
+    }
+    $typePhaseIndex =
+        [System.Array]::IndexOf(
+            $topLevelStatements,
+            $phaseAssignmentAsts[0]
+        )
+    $nativeTryIndex =
+        [System.Array]::IndexOf($topLevelStatements, $nativeTry)
+    if ($typePhaseIndex -lt 0 -or
+        $nativeTryIndex -ne ($typePhaseIndex + 1)) {
+        return $false
+    }
+
+    # outer try先頭8 statementをclosed sequenceとして固定する。
+    $nativeStatements = @($nativeTry.Body.Statements)
+    if ($nativeStatements.Count -lt 8 -or
+        -not [object]::ReferenceEquals(
+            $nativeStatements[0],
+            $phaseFaultIfAsts[0]
+        ) -or
+        $nativeStatements[1] -isnot
+            [System.Management.Automation.Language.IfStatementAst] -or
+        -not [object]::ReferenceEquals(
+            $nativeStatements[2],
+            $phaseAssignmentAsts[1]
+        ) -or
+        -not [object]::ReferenceEquals(
+            $nativeStatements[3],
+            $phaseFaultIfAsts[1]
+        ) -or
+        $nativeStatements[4] -isnot
+            [System.Management.Automation.Language.AssignmentStatementAst] -or
+        -not (& $variableName $nativeStatements[4].Left 'nativeGateIsMacOS') -or
+        -not [object]::ReferenceEquals(
+            $nativeStatements[5],
+            $phaseAssignmentAsts[2]
+        ) -or
+        -not [object]::ReferenceEquals(
+            $nativeStatements[6],
+            $phaseFaultIfAsts[2]
+        ) -or
+        $nativeStatements[7] -isnot
+            [System.Management.Automation.Language.AssignmentStatementAst] -or
+        -not (& $variableName $nativeStatements[7].Left 'sessionResult')) {
+        return $false
+    }
+
+    # Add-Typeはtype Ifのdirect command、platform/sessionはdirect member RHS。
+    $typeDefinitionIf = $nativeStatements[1]
+    if ($typeDefinitionIf.Clauses.Count -ne 1 -or
+        $null -ne $typeDefinitionIf.ElseClause -or
+        $typeDefinitionIf.Clauses[0].Item2.Statements.Count -ne 1) {
+        return $false
+    }
+    $addTypeStatement =
+        $typeDefinitionIf.Clauses[0].Item2.Statements[0]
+    if ($addTypeStatement -isnot
+        [System.Management.Automation.Language.PipelineAst] -or
+        $addTypeStatement.PipelineElements.Count -ne 1 -or
+        $addTypeStatement.PipelineElements[0] -isnot
+            [System.Management.Automation.Language.CommandAst] -or
+        -not (& $equalsOrdinal $addTypeStatement.PipelineElements[0].GetCommandName() 'Add-Type')) {
+        return $false
+    }
+    $addTypeCommand = $addTypeStatement.PipelineElements[0]
+    if ($addTypeCommand.CommandElements.Count -ne 3 -or
+        $addTypeCommand.CommandElements[1] -isnot
+            [System.Management.Automation.Language.CommandParameterAst] -or
+        -not (& $equalsOrdinal $addTypeCommand.CommandElements[1].ParameterName 'TypeDefinition') -or
+        $addTypeCommand.CommandElements[2] -isnot
+            [System.Management.Automation.Language.StringConstantExpressionAst] -or
+        $addTypeCommand.CommandElements[2].StringConstantType -ne
+            [System.Management.Automation.Language.StringConstantType]::DoubleQuotedHereString) {
+        return $false
+    }
+    $nativeDefinitionBytes = [System.Text.Encoding]::UTF8.GetBytes(
+        [string]$addTypeCommand.CommandElements[2].Value
+    )
+    $nativeDefinitionHasher =
+        [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $nativeDefinitionHash = (
+            [System.BitConverter]::ToString(
+                $nativeDefinitionHasher.ComputeHash($nativeDefinitionBytes)
+            )
+        ).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $nativeDefinitionHasher.Dispose()
+    }
+    if (-not (& $equalsOrdinal $nativeDefinitionHash 'f314d1cdd3a5d63ca73b6cfc4d7acbc4284d4f342ccc795eeaa891a61dbfd8b0')) {
+        return $false
+    }
+    $platformRight = $nativeStatements[4].Right
+    $sessionRight = $nativeStatements[7].Right
+    if ($platformRight -isnot
+        [System.Management.Automation.Language.CommandExpressionAst] -or
+        $platformRight.Expression -isnot
+            [System.Management.Automation.Language.InvokeMemberExpressionAst] -or
+        -not (& $equalsOrdinal $platformRight.Expression.Expression.TypeName.FullName 'Runtime.InteropServices.RuntimeInformation') -or
+        -not (& $equalsOrdinal $platformRight.Expression.Member.Value 'IsOSPlatform') -or
+        $platformRight.Expression.Arguments.Count -ne 1 -or
+        -not (& $equalsOrdinal $platformRight.Expression.Arguments[0].Extent.Text '[Runtime.InteropServices.OSPlatform]::OSX') -or
+        $sessionRight -isnot
+            [System.Management.Automation.Language.CommandExpressionAst] -or
+        $sessionRight.Expression -isnot
+            [System.Management.Automation.Language.InvokeMemberExpressionAst] -or
+        -not (& $equalsOrdinal $sessionRight.Expression.Expression.TypeName.FullName 'PrivateMarker.NativePosixSession') -or
+        -not (& $equalsOrdinal $sessionRight.Expression.Member.Value 'Create') -or
+        $sessionRight.Expression.Arguments.Count -ne 1 -or
+        -not (& $variableName $sessionRight.Expression.Arguments[0] 'nativeGateIsMacOS')) {
+        return $false
+    }
+
+    return $true
+}
+
+function Assert-NativePosixGateWrapperContract {
+    param([string]$RelativePath)
+
+    try {
+        $source = Get-RepoUtf8Text -RelativePath $RelativePath
+    }
+    catch {
+        Add-Failure "$RelativePath must be valid UTF-8 (native POSIX wrapper contract)"
+        return
+    }
+    if (-not (Test-NativePosixGateWrapperContract -Source $source)) {
+        Add-Failure "$RelativePath violates the executable native POSIX wrapper contract."
+    }
+}
+
+function Test-NativePosixGateWrapperMutationGuards {
+    param([string]$RelativePath)
+
+    try {
+        $source = Get-RepoUtf8Text -RelativePath $RelativePath
+    }
+    catch {
+        Add-Failure "$RelativePath must be valid UTF-8 (native POSIX wrapper mutation guards)"
+        return
+    }
+    if (-not (Test-NativePosixGateWrapperContract -Source $source)) {
+        Add-Failure 'Native POSIX wrapper mutation baseline must satisfy the contract.'
+        return
+    }
+
+    $mutationTokens = $null
+    $mutationParseErrors = $null
+    $mutationAst =
+        [System.Management.Automation.Language.Parser]::ParseInput(
+            $source,
+            [ref]$mutationTokens,
+            [ref]$mutationParseErrors
+        )
+    $wrapperAssignmentForMutation = @(
+        $mutationAst.FindAll(
+            {
+                param($node)
+                $node -is
+                    [System.Management.Automation.Language.AssignmentStatementAst] -and
+                [string]::Equals(
+                    $node.Left.Extent.Text,
+                    '$posixWrapperTemplate',
+                    [System.StringComparison]::Ordinal
+                )
+            },
+            $true
+        )
+    )[0]
+    $cleanupForEachForMutation = @(
+        $mutationAst.FindAll(
+            {
+                param($node)
+                $node -is
+                    [System.Management.Automation.Language.ForEachStatementAst] -and
+                [string]::Equals(
+                    $node.Variable.VariablePath.UserPath,
+                    'gatePath',
+                    [System.StringComparison]::Ordinal
+                )
+            },
+            $true
+        )
+    )[0]
+    $wrapperForMutation =
+        $wrapperAssignmentForMutation.Right.Expression.Value
+    $wrapperBlockStatementsForMutation =
+        @($wrapperAssignmentForMutation.Parent.Statements)
+    $wrapperIndexForMutation = [System.Array]::IndexOf(
+        $wrapperBlockStatementsForMutation,
+        $wrapperAssignmentForMutation
+    )
+    $wrapperSequenceStart =
+        $wrapperBlockStatementsForMutation[
+            $wrapperIndexForMutation - 1
+        ].Extent.StartOffset
+    $wrapperSequenceEnd =
+        $wrapperBlockStatementsForMutation[
+            $wrapperIndexForMutation + 1
+        ].Extent.EndOffset
+    $wrapperSequenceForMutation = $source.Substring(
+        $wrapperSequenceStart,
+        $wrapperSequenceEnd - $wrapperSequenceStart
+    )
+    $wrapperScriptAssignmentForMutation =
+        $wrapperBlockStatementsForMutation[$wrapperIndexForMutation + 1]
+    $wrapperMutationTokens = $null
+    $wrapperMutationParseErrors = $null
+    $wrapperAstForMutation =
+        [System.Management.Automation.Language.Parser]::ParseInput(
+            $wrapperForMutation,
+            [ref]$wrapperMutationTokens,
+            [ref]$wrapperMutationParseErrors
+        )
+    $wrapperTopStatementsForMutation =
+        @($wrapperAstForMutation.EndBlock.Statements)
+    $statusFunctionForMutation = @(
+        $wrapperAstForMutation.FindAll(
+            {
+                param($node)
+                $node -is
+                    [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                [string]::Equals(
+                    $node.Name,
+                    'Write-NativeGateStatus',
+                    [System.StringComparison]::Ordinal
+                )
+            },
+            $true
+        )
+    )[0]
+    $statusTryForMutation =
+        $statusFunctionForMutation.Body.EndBlock.Statements[0]
+    $statusOuterCatchForMutation =
+        $statusTryForMutation.CatchClauses[0]
+    $statusCleanupTryForMutation =
+        $statusOuterCatchForMutation.Body.Statements[0]
+    $statusInnerCatchForMutation =
+        $statusCleanupTryForMutation.CatchClauses[0]
+    $addTypeForMutation = [regex]::Match(
+        $wrapperForMutation,
+        '(?ms)^[ \t]*Add-Type -TypeDefinition @".*?^"@[ \t]*$'
+    ).Value
+    $platformAssignmentForMutation = [regex]::Match(
+        $wrapperForMutation,
+        (
+            '(?ms)^[ \t]*\$nativeGateIsMacOS =\r?\n' +
+            '[ \t]*\[Runtime\.InteropServices\.RuntimeInformation\]' +
+            '::IsOSPlatform\(\r?\n' +
+            '[ \t]*\[Runtime\.InteropServices\.OSPlatform\]::OSX\r?\n' +
+            '[ \t]*\)[ \t]*$'
+        )
+    ).Value
+    $sessionAssignmentForMutation = [regex]::Match(
+        $wrapperForMutation,
+        (
+            '(?ms)^[ \t]*\$sessionResult =\r?\n' +
+            '[ \t]*\[PrivateMarker\.NativePosixSession\]' +
+            '::Create\(\$nativeGateIsMacOS\)[ \t]*$'
+        )
+    ).Value
+    $zeroWidthPhaseName =
+        'nativeGate' + [char]0x200B + 'Phase'
+    $statusFunctionText = $statusFunctionForMutation.Extent.Text
+    $statusFunctionHeader =
+        'function Write-NativeGateStatus([string]$Status) {'
+    $statusFunctionWithBegin = $statusFunctionText.Replace(
+        $statusFunctionHeader,
+        (
+            $statusFunctionHeader + "`n" +
+            '    begin { exit 0 }' + "`n" +
+            '    end {'
+        )
+    ) + "`n}"
+
+    $phaseFaultBlock = @'
+if ($testOnlyNativeGateFailurePhase -ceq $nativeGatePhase) {
+        throw 'Synthetic native POSIX gate phase failure.'
+    }
+'@
+    $atomicPublicationBlock = @'
+[IO.File]::WriteAllText(
+            $statusStagingPath,
+            $Status,
+            [Text.UTF8Encoding]::new($false)
+        )
+        [IO.File]::Move($statusStagingPath, $statusPath)
+'@
+    $mutations = @(
+        [pscustomobject]@{
+            Name = 'block-comment-wrapper-assignment'
+            Source = $source.Replace(
+                $wrapperAssignmentForMutation.Extent.Text,
+                (
+                    '<#' + "`n" +
+                    $wrapperAssignmentForMutation.Extent.Text + "`n" +
+                    '#>'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'block-comment-cleanup-foreach'
+            Source = $source.Replace(
+                $cleanupForEachForMutation.Extent.Text,
+                (
+                    '<#' + "`n" +
+                    $cleanupForEachForMutation.Extent.Text + "`n" +
+                    '#>'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'cleanup-index-subset'
+            Source = $source.Replace(
+                (
+                    '$posixGateStatusStagingPath' + "`n" +
+                    '        )) {'
+                ),
+                (
+                    '$posixGateStatusStagingPath' + "`n" +
+                    '        )[0..2]) {'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'cleanup-unary-array-wrapper'
+            Source = $source.Replace(
+                'foreach ($gatePath in @(',
+                'foreach ($gatePath in ,@('
+            )
+        },
+        [pscustomobject]@{
+            Name = 'reorder-cleanup-collection'
+            Source = $source.Replace(
+                (
+                    '$posixGateReadyPath,' + "`n" +
+                    '            $posixGateReleasePath,'
+                ),
+                (
+                    '$posixGateReleasePath,' + "`n" +
+                    '            $posixGateReadyPath,'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'empty-cleanup-body'
+            Source = $source.Replace(
+                $cleanupForEachForMutation.Body.Extent.Text,
+                '{ }'
+            )
+        },
+        [pscustomobject]@{
+            Name = 'cleanup-nested-false-finally'
+            Source = $source.Replace(
+                $cleanupForEachForMutation.Extent.Text,
+                (
+                    'if ($false) {' + "`n" +
+                    '    try {} finally {' + "`n" +
+                    '        ' +
+                    $cleanupForEachForMutation.Extent.Text.Replace(
+                        "`n",
+                        "`n        "
+                    ) + "`n" +
+                    '    }' + "`n" +
+                    '}'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'wrapper-sequence-if-false'
+            Source = $source.Replace(
+                $wrapperSequenceForMutation,
+                (
+                    'if ($false) {' + "`n" +
+                    $wrapperSequenceForMutation + "`n" +
+                    '}'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'wrapper-sequence-nested-try'
+            Source = $source.Replace(
+                $wrapperSequenceForMutation,
+                (
+                    'try {' + "`n" +
+                    $wrapperSequenceForMutation + "`n" +
+                    '} finally {}'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'wrapper-sequence-empty-loop'
+            Source = $source.Replace(
+                $wrapperSequenceForMutation,
+                (
+                    'foreach ($unusedWrapperItem in @()) {' + "`n" +
+                    $wrapperSequenceForMutation + "`n" +
+                    '}'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'wrapper-sequence-switch'
+            Source = $source.Replace(
+                $wrapperSequenceForMutation,
+                (
+                    'switch ($false) {' + "`n" +
+                    '    $true {' + "`n" +
+                    $wrapperSequenceForMutation + "`n" +
+                    '    }' + "`n" +
+                    '}'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'wrapper-sequence-scriptblock'
+            Source = $source.Replace(
+                $wrapperSequenceForMutation,
+                (
+                    '& {' + "`n" +
+                    $wrapperSequenceForMutation + "`n" +
+                    '}'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'wrapper-sequence-unused-function'
+            Source = $source.Replace(
+                $wrapperSequenceForMutation,
+                (
+                    'function Initialize-UnusedWrapper {' + "`n" +
+                    $wrapperSequenceForMutation + "`n" +
+                    '}'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'empty-wrapper-script-rhs'
+            Source = $source.Replace(
+                $wrapperScriptAssignmentForMutation.Right.Extent.Text,
+                "''"
+            )
+        },
+        [pscustomobject]@{
+            Name = 'wrong-ready-base64-provenance'
+            Source = $source.Replace(
+                $wrapperBlockStatementsForMutation[
+                    $wrapperIndexForMutation - 5
+                ].Extent.Text,
+                $wrapperBlockStatementsForMutation[
+                    $wrapperIndexForMutation - 5
+                ].Extent.Text.Replace(
+                    '$posixGateReadyPath',
+                    '$posixGateReleasePath'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'wrong-status-decode-placeholder'
+            Source = $source.Replace(
+                $wrapperTopStatementsForMutation[2].Extent.Text,
+                $wrapperTopStatementsForMutation[2].Extent.Text.Replace(
+                    '__STATUS_PATH__',
+                    '__STATUS_STAGING_PATH__'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'wrong-wrapper-replace-source'
+            Source = $source.Replace(
+                $wrapperScriptAssignmentForMutation.Right.Extent.Text,
+                $wrapperScriptAssignmentForMutation.Right.Extent.Text.Replace(
+                    '$readyPathBase64',
+                    '$releasePathBase64'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'duplicate-wrapper-replace-call'
+            Source = $source.Replace(
+                $wrapperScriptAssignmentForMutation.Right.Extent.Text,
+                (
+                    $wrapperScriptAssignmentForMutation.Right.Extent.Text +
+                    ".Replace('__READY_PATH__', `$readyPathBase64)"
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'status-function-begin-block'
+            Source = $source.Replace(
+                $statusFunctionText,
+                $statusFunctionWithBegin
+            )
+        },
+        [pscustomobject]@{
+            Name = 'status-function-wrong-parameter'
+            Source = $source.Replace(
+                $statusFunctionHeader,
+                'function Write-NativeGateStatus([object]$Status) {'
+            )
+        },
+        [pscustomobject]@{
+            Name = 'status-cleanup-false-and-condition'
+            Source = $source.Replace(
+                '[IO.File]::Exists($statusStagingPath)',
+                '$false -and [IO.File]::Exists($statusStagingPath)'
+            )
+        },
+        [pscustomobject]@{
+            Name = 'status-cleanup-true-or-condition'
+            Source = $source.Replace(
+                '[IO.File]::Exists($statusStagingPath)',
+                '[IO.File]::Exists($statusStagingPath) -or $true'
+            )
+        },
+        [pscustomobject]@{
+            Name = 'status-outer-typed-catch'
+            Source = $source.Replace(
+                $statusOuterCatchForMutation.Extent.Text,
+                $statusOuterCatchForMutation.Extent.Text.Replace(
+                    'catch {',
+                    'catch [System.IO.IOException] {'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'status-inner-typed-catch'
+            Source = $source.Replace(
+                $statusInnerCatchForMutation.Extent.Text,
+                $statusInnerCatchForMutation.Extent.Text.Replace(
+                    'catch {',
+                    'catch [System.IO.IOException] {'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'placeholder-add-type-definition'
+            Source = $source.Replace(
+                $addTypeForMutation,
+                "Add-Type -TypeDefinition 'public class Placeholder {}'"
+            )
+        },
+        [pscustomobject]@{
+            Name = 'add-type-extra-parameter'
+            Source = $source.Replace(
+                'Add-Type -TypeDefinition @"',
+                'Add-Type -ErrorAction Stop -TypeDefinition @"'
+            )
+        },
+        [pscustomobject]@{
+            Name = 'add-type-shadow-function'
+            Source = $source.Replace(
+                $addTypeForMutation,
+                (
+                    'function Add-Type { param($TypeDefinition) }' + "`n" +
+                    '        ' + $addTypeForMutation
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'add-type-dynamic-definition'
+            Source = $source.Replace(
+                $addTypeForMutation,
+                (
+                    '$dynamicNativeDefinition = ' +
+                    $addTypeForMutation.Substring(
+                        $addTypeForMutation.IndexOf('@"')
+                    ) + "`n" +
+                    '        Add-Type -TypeDefinition ' +
+                    '$dynamicNativeDefinition'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'unused-function-atomic-publication'
+            Source = $source.Replace(
+                $atomicPublicationBlock,
+                (
+                    'function Invoke-UnusedAtomicPublication {' + "`n" +
+                    '        ' +
+                    $atomicPublicationBlock.Replace(
+                        "`n",
+                        "`n        "
+                    ) + "`n" +
+                    '    }'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'unused-function-add-type'
+            Source = $source.Replace(
+                $addTypeForMutation,
+                (
+                    'function Initialize-UnusedNativeGate {' + "`n" +
+                    '    ' +
+                    $addTypeForMutation.Replace("`n", "`n    ") + "`n" +
+                    '}'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'scriptblock-platform-rhs'
+            Source = $source.Replace(
+                $platformAssignmentForMutation,
+                (
+                    '$nativeGateIsMacOS = {' + "`n" +
+                    $platformAssignmentForMutation.Substring(
+                        $platformAssignmentForMutation.IndexOf("`n") + 1
+                    ) + "`n" +
+                    '    }'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'scriptblock-session-rhs'
+            Source = $source.Replace(
+                $sessionAssignmentForMutation,
+                (
+                    '$sessionResult = {' + "`n" +
+                    $sessionAssignmentForMutation.Substring(
+                        $sessionAssignmentForMutation.IndexOf("`n") + 1
+                    ) + "`n" +
+                    '    }'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'system-io-get-variable-final-write'
+            Source = $source.Replace(
+                $atomicPublicationBlock,
+                (
+                    '[System.IO.File]::WriteAllText(' + "`n" +
+                    '            (Get-Variable -Name statusPath -ValueOnly),' +
+                    "`n" +
+                    '            $Status,' + "`n" +
+                    '            [Text.UTF8Encoding]::new($false)' + "`n" +
+                    '        )' + "`n" +
+                    '        ' + $atomicPublicationBlock
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'zero-width-phase-with-comment-decoy'
+            Source = $source.Replace(
+                "`$nativeGatePhase = 'platform-detection'",
+                (
+                    '<#' + "`n" +
+                    "`$nativeGatePhase = 'platform-detection'" + "`n" +
+                    '#>' + "`n" +
+                    '${' + $zeroWidthPhaseName +
+                    "} = 'platform-detection'"
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'block-comment-atomic-publication'
+            Source = $source.Replace(
+                $atomicPublicationBlock,
+                '<#' + "`n" + $atomicPublicationBlock + "`n" + '#>'
+            )
+        },
+        [pscustomobject]@{
+            Name = 'here-string-atomic-decoy'
+            Source = $source.Replace(
+                $atomicPublicationBlock,
+                (
+                    "`$atomicPublicationDecoy = @`"" + "`n" +
+                    $atomicPublicationBlock + "`n" +
+                    '"@'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'block-comment-platform-assignment'
+            Source = $source.Replace(
+                "`$nativeGatePhase = 'platform-detection'",
+                (
+                    '<#' + "`n" +
+                    "`$nativeGatePhase = 'platform-detection'" + "`n" +
+                    '#>'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'direct-final-write-before-staging'
+            Source = $source.Replace(
+                (
+                    '[IO.File]::WriteAllText(' + "`n" +
+                    '            $statusStagingPath,'
+                ),
+                (
+                    '[IO.File]::WriteAllText(' + "`n" +
+                    '            $statusPath,' + "`n" +
+                    '            $Status,' + "`n" +
+                    '            [Text.UTF8Encoding]::new($false)' + "`n" +
+                    '        )' + "`n" +
+                    '        [IO.File]::WriteAllText(' + "`n" +
+                    '            $statusStagingPath,'
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'comment-atomic-move'
+            Source = $source.Replace(
+                '[IO.File]::Move($statusStagingPath, $statusPath)',
+                '# [IO.File]::Move($statusStagingPath, $statusPath)'
+            )
+        },
+        [pscustomobject]@{
+            Name = 'remove-phase-fault-seams'
+            Source = $source.Replace($phaseFaultBlock, '')
+        },
+        [pscustomobject]@{
+            Name = 'reorder-phase-assignments'
+            Source = $source.Replace(
+                "`$nativeGatePhase = 'platform-detection'",
+                "`$nativeGatePhase = '__phase-swap__'"
+            ).Replace(
+                "`$nativeGatePhase = 'native-invocation'",
+                "`$nativeGatePhase = 'platform-detection'"
+            ).Replace(
+                "`$nativeGatePhase = '__phase-swap__'",
+                "`$nativeGatePhase = 'native-invocation'"
+            )
+        },
+        [pscustomobject]@{
+            Name = 'comment-phase-assignment'
+            Source = $source.Replace(
+                "`$nativeGatePhase = 'platform-detection'",
+                "# `$nativeGatePhase = 'platform-detection'"
+            )
+        },
+        [pscustomobject]@{
+            Name = 'extra-phase-assignment-before-type-operation'
+            Source = $source.Replace(
+                (
+                    '    if ($null -eq (' +
+                    "'PrivateMarker.NativePosixSession' -as [type])) {"
+                ),
+                (
+                    "    `$nativeGatePhase = 'native-invocation'" + "`n" +
+                    '    if ($null -eq (' +
+                    "'PrivateMarker.NativePosixSession' -as [type])) {"
+                )
+            )
+        },
+        [pscustomobject]@{
+            Name = 'comment-staging-cleanup'
+            Source = $source.Replace(
+                (
+                    '            $posixGateStatusPath,' + "`n" +
+                    '            $posixGateStatusStagingPath' + "`n"
+                ),
+                (
+                    '            $posixGateStatusPath' + "`n" +
+                    '            # $posixGateStatusStagingPath' + "`n"
+                )
+            )
+        }
+    )
+    foreach ($topLevelInjection in @(
+        [pscustomobject]@{ Name = 'exit'; Statement = 'exit 0' }
+        [pscustomobject]@{ Name = 'return'; Statement = 'return' }
+        [pscustomobject]@{
+            Name = 'throw'
+            Statement = "throw 'Synthetic top-level bypass.'"
+        }
+        [pscustomobject]@{ Name = 'break'; Statement = 'break' }
+        [pscustomobject]@{ Name = 'continue'; Statement = 'continue' }
+        [pscustomobject]@{
+            Name = 'assignment'
+            Statement = '$unexpectedTopLevelStatement = $true'
+        }
+    )) {
+        $mutations += [pscustomobject]@{
+            Name = "wrapper-top-level-$($topLevelInjection.Name)"
+            Source = $source.Replace(
+                "`$nativeGatePhase = 'type-definition'",
+                (
+                    $topLevelInjection.Statement + "`n" +
+                    "`$nativeGatePhase = 'type-definition'"
+                )
+            )
+        }
+    }
+
+    foreach ($mutation in $mutations) {
+        if ($mutation.Source -ceq $source) {
+            Add-Failure "Native POSIX wrapper mutation did not change source: $($mutation.Name)."
+            continue
+        }
+        $mutatedTokens = $null
+        $mutatedParseErrors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseInput(
+            $mutation.Source,
+            [ref]$mutatedTokens,
+            [ref]$mutatedParseErrors
+        )
+        if ($mutatedParseErrors.Count -ne 0) {
+            Add-Failure "Native POSIX wrapper mutation must remain parsable: $($mutation.Name)."
+        } elseif (Test-NativePosixGateWrapperContract -Source $mutation.Source) {
+            Add-Failure "Native POSIX wrapper mutation was not rejected: $($mutation.Name)."
+        }
+    }
+}
+
 function Assert-FinalScanDeadlineContract {
     param([string]$RelativePath)
 
@@ -1456,6 +3061,8 @@ Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern 
 Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern 'PosixSessionGate = \$posixSessionGate' -Description 'reported POSIX gate selection'
 Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern 'ConvertTo-PrivateMarkerPosixGateFailureReason' -Description 'fixed POSIX gate failure diagnostics'
 Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern 'Read-PrivateMarkerPosixGateStatus' -Description 'bounded POSIX gate status reader'
+Assert-NativePosixGateWrapperContract -RelativePath 'scripts/private-marker-process.ps1'
+Test-NativePosixGateWrapperMutationGuards -RelativePath 'scripts/private-marker-process.ps1'
 Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern 'New-Object byte\[\] 65' -Description '65-byte POSIX status overflow probe'
 Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern '\$statusLength -gt 64' -Description '64-byte POSIX status acceptance limit'
 Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern 'UTF8Encoding\(\$false, \$true\)' -Description 'strict POSIX status UTF-8 decode'

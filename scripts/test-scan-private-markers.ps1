@@ -3303,6 +3303,18 @@ $stream.Flush()
             Expected = 'native-entrypoint'
         },
         [pscustomobject]@{
+            Status = 'native-type-definition'
+            Expected = 'native-type-definition'
+        },
+        [pscustomobject]@{
+            Status = 'native-platform-detection'
+            Expected = 'native-platform-detection'
+        },
+        [pscustomobject]@{
+            Status = 'native-invocation'
+            Expected = 'native-invocation'
+        },
+        [pscustomobject]@{
             Status = 'setsid-error-1'
             Expected = 'setsid-error-1'
         },
@@ -3393,6 +3405,74 @@ $stream.Flush()
         $nativeWrapperSource = [IO.File]::ReadAllText($processBoundary)
         if ($nativeWrapperSource -cmatch '(?im)^\s*\$isMacOS\s*=') {
             Add-Failure 'Expected the native POSIX wrapper to avoid the read-only IsMacOS automatic variable.'
+        }
+        if ($nativeWrapperSource -notmatch
+            '\[IO\.File\]::Move\(\$statusStagingPath, \$statusPath\)' -or
+            $nativeWrapperSource -notmatch
+            '\$posixGateStatusStagingPath') {
+            Add-Failure 'Expected the native POSIX status channel to publish only a closed staging file.'
+        }
+
+        # 各phaseを実childで失敗させ、atomic公開されたfixed statusを親が
+        # 読み取れることと、final/stagingをfinallyが残さないことを同時に測る。
+        foreach ($nativeGateFailureCase in @(
+            [pscustomobject]@{
+                Phase = 'type-definition'
+                ExpectedReason = 'native-type-definition'
+            },
+            [pscustomobject]@{
+                Phase = 'platform-detection'
+                ExpectedReason = 'native-platform-detection'
+            },
+            [pscustomobject]@{
+                Phase = 'native-invocation'
+                ExpectedReason = 'native-invocation'
+            }
+        )) {
+            $nativeGateFailurePhase =
+                [string]$nativeGateFailureCase.Phase
+            $nativeGateFailureIsolation =
+                Join-Path $tempRoot "native-gate-$nativeGateFailurePhase"
+            $observedNativeGateFailure = ''
+            try {
+                [void](Invoke-PrivateMarkerProcess `
+                        -FileName $currentPowerShellExecutable `
+                        -Arguments @('-NoProfile', '-Command', 'exit 0') `
+                        -WorkingDirectory $tempRoot `
+                        -IsolationRoot $nativeGateFailureIsolation `
+                        -TimeoutMilliseconds 10000 `
+                        -ForceNativePosixSessionGate `
+                        -TestOnlyNativePosixGateFailurePhase (
+                            $nativeGateFailurePhase
+                        ))
+                Add-Failure "Expected native POSIX gate phase '$nativeGateFailurePhase' to fail closed."
+            }
+            catch {
+                $observedNativeGateFailure = $_.Exception.Message
+            }
+            $expectedNativeGateFailure = (
+                'Failed to establish the bounded POSIX session gate (' +
+                "$($nativeGateFailureCase.ExpectedReason))."
+            )
+            if ($observedNativeGateFailure -cne
+                $expectedNativeGateFailure) {
+                Add-Failure "Expected native POSIX gate phase '$nativeGateFailurePhase' to publish only its fixed parent reason."
+            }
+
+            $nativeGateFailureResidue = @()
+            if (Test-Path -LiteralPath $nativeGateFailureIsolation) {
+                $nativeGateFailureResidue = @(
+                    Get-ChildItem `
+                        -LiteralPath $nativeGateFailureIsolation `
+                        -Force |
+                        Where-Object {
+                            $_.Name -like 'private-marker-posix-*'
+                        }
+                )
+            }
+            if ($nativeGateFailureResidue.Count -ne 0) {
+                Add-Failure "Expected native POSIX gate phase '$nativeGateFailurePhase' to remove final and staging status files."
+            }
         }
 
         # direct parentが終了済みでも、同じprocess groupの孫をsignalして

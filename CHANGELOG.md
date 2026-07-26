@@ -75,6 +75,21 @@ The format loosely follows Keep a Changelog conventions.
   signaling while retaining `libc` on Linux, and added a bounded fixed-code
   gate-status channel that diagnoses native library, entry-point, errno,
   and ready-file failures without reflecting target output or paths.
+- Published native-gate status atomically from a closed staging file and
+  added fixed phase codes for type definition, platform detection, and
+  native invocation so a macOS startup failure cannot be hidden by a
+  partial status read or arbitrary exception text. POSIX self-tests now
+  fault each phase in a real child, require the corresponding fixed parent
+  reason, and reject final/staging residue. The readiness validator uses the
+  full-source Parser AST to bind the wrapper assignment and cleanup loop to
+  the same exact try/else execution path, then parses the embedded wrapper.
+  It closes the six base64 source assignments and Replace chain, final
+  cleanup collection/body, wrapper top-level sequence, status-function
+  blocks/catch-all handlers/parameter/body, direct Exists/Delete condition,
+  filesystem-call allowlist, and hashed Add-Type
+  definition. Ordinal phase/source checks reject false control-flow wrappers,
+  sliced cleanup collections, nested substitutions, direct final writes,
+  zero-width names, block comments, and textual decoys.
 - Avoided the read-only PowerShell 7 `$IsMacOS` automatic variable when
   selecting the native session library.
 - Expanded validation to a bounded Windows job covering PowerShell 7 and

@@ -321,9 +321,25 @@ generic successful exit as macOS containment evidence.
 The native wrapper resolves `setsid` / `kill` through
 `libSystem.B.dylib` on macOS and `libc` on other POSIX hosts. Startup
 failures use a bounded, fixed-code status channel that distinguishes native
-library, entry-point, `setsid` errno, and ready-file failures. Unknown
-status content is reported only as `unknown`; target output and paths are
-not reflected into the diagnostic.
+library, entry-point, type-definition, platform-detection, native-invocation,
+`setsid` errno, and ready-file failures. The child closes a staging file
+before atomically publishing the final status path, so the parent never
+accepts a partially written diagnostic. Unknown status content is reported
+only as `unknown`; target output and paths are not reflected into the
+diagnostic. The POSIX self-test injects a fixed failure at each native
+startup phase, verifies the matching parent reason, and requires cleanup of
+both final and staging files. Readiness validation locates the executable
+wrapper assignment and its cleanup loop on the same expected try/else path,
+then parses the embedded wrapper itself. It fixes all six base64 sources and
+placeholder replacements; closes the status function blocks, catch-all
+handlers, parameter, staging write, atomic move, and direct Exists/Delete
+failure cleanup; closes the final cleanup
+collection and Delete body; and allows only the eight expected wrapper
+top-level statements. The wrapper-wide file-call allowlist, exact native
+definition hash, phase assignments, fault seams, and direct native calls use
+ordinal comparisons. Mutations hidden behind false control flow, nested
+functions/scriptblocks, sliced cleanup collections, direct final writes,
+altered phase names, or textual comments and here-strings therefore fail.
 
 The scanner, its process helper, its self-test, and the readiness validator
 contain Japanese comments and are also executed by Windows PowerShell 5.1.
