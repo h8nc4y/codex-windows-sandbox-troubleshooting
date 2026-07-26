@@ -1356,6 +1356,7 @@ function Invoke-PrivateMarkerProcess {
     $posixProcessGroupId = 0
     $posixGateReadyPath = $null
     $posixGateReleasePath = $null
+    $posixSessionGate = 'not-applicable'
     $stdinStream = $null
     $stdoutStream = $null
     $stderrStream = $null
@@ -1430,11 +1431,13 @@ function Invoke-PrivateMarkerProcess {
                 -not [string]::IsNullOrWhiteSpace($setsidPath)) {
                 # setsid自身がtargetをexecする前にsession/process groupを作る。
                 # targetは親がgroup IDを記録する前に走れても境界外へは出られない。
+                $posixSessionGate = 'external-setsid'
                 $effectiveFileName = $setsidPath
                 $effectiveArguments = @('--', $FileName) + @($Arguments)
             } else {
                 # macOS等でsetsid executableが無い場合は、同じpwsh child内で
                 # setsid(2)を先に実行し、親がgroup IDを記録するまでtargetを止める。
+                $posixSessionGate = 'native-setsid'
                 $useNativePosixSessionGate = $true
                 $gateRoot = if ([string]::IsNullOrWhiteSpace($IsolationRoot)) {
                     [System.IO.Path]::GetTempPath()
@@ -1935,6 +1938,7 @@ catch {
         PipeLeakDetected = $pipeLeakDetected
         StreamsCompleted = $streamsCompleted
         TreeStopped = $treeStopped
+        PosixSessionGate = $posixSessionGate
     }
 }
 

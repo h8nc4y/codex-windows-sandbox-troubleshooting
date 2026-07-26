@@ -747,6 +747,30 @@ jobs:
       - name: Check whitespace
         shell: pwsh
         run: git diff-tree -r --check 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD
+
+  validate-macos:
+    name: Validate native macOS process containment
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Validate OSS readiness
+        shell: pwsh
+        run: ./scripts/validate-oss-readiness.ps1
+
+      - name: Test native POSIX containment on Darwin
+        shell: pwsh
+        run: ./scripts/test-scan-private-markers.ps1 -RequireMacOSNativePosixContainment
+
+      - name: Scan for private markers
+        shell: pwsh
+        run: ./scripts/scan-private-markers.ps1
+
+      - name: Check whitespace
+        shell: pwsh
+        run: git diff-tree -r --check 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD
 '@
     $actualNormalized = $actual.Replace("`r`n", "`n").TrimEnd(
         [char]13,
@@ -770,7 +794,7 @@ function Assert-WorkflowContract {
     Assert-WorkflowEnvelope -RelativePath $RelativePath
     Assert-WorkflowJobSet `
         -RelativePath $RelativePath `
-        -ExpectedJobNames @('validate', 'validate-ubuntu')
+        -ExpectedJobNames @('validate', 'validate-ubuntu', 'validate-macos')
 
     $windowsJobName = 'validate'
     $windowsJobLines = @(Get-WorkflowJobLines `
@@ -902,6 +926,68 @@ function Assert-WorkflowContract {
         -Shell 'pwsh' `
         -Run 'git diff-tree -r --check 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD'
 
+    $macOSJobName = 'validate-macos'
+    $macOSJobLines = @(Get-WorkflowJobLines `
+        -RelativePath $RelativePath `
+        -JobName $macOSJobName)
+    $macOSSteps = @(Get-WorkflowSteps `
+        -Lines $macOSJobLines `
+        -JobName $macOSJobName)
+    Assert-WorkflowJobValue `
+        -Lines $macOSJobLines `
+        -JobName $macOSJobName `
+        -Key 'name' `
+        -ExpectedValue 'Validate native macOS process containment'
+    Assert-WorkflowJobValue `
+        -Lines $macOSJobLines `
+        -JobName $macOSJobName `
+        -Key 'runs-on' `
+        -ExpectedValue 'macos-15'
+    Assert-WorkflowJobValue `
+        -Lines $macOSJobLines `
+        -JobName $macOSJobName `
+        -Key 'timeout-minutes' `
+        -ExpectedValue '10'
+    Assert-WorkflowStepCount `
+        -Steps $macOSSteps `
+        -JobName $macOSJobName `
+        -ExpectedCount 5
+    Assert-WorkflowJobShape `
+        -Lines $macOSJobLines `
+        -JobName $macOSJobName `
+        -ExpectedStepCount 5 `
+        -ExpectedShellCount 4 `
+        -ExpectedRunCount 4
+    Assert-WorkflowUsesStep `
+        -Steps $macOSSteps `
+        -JobName $macOSJobName `
+        -Name 'Check out repository' `
+        -Uses $checkoutRevision
+    Assert-WorkflowStep `
+        -Steps $macOSSteps `
+        -JobName $macOSJobName `
+        -Name 'Validate OSS readiness' `
+        -Shell 'pwsh' `
+        -Run './scripts/validate-oss-readiness.ps1'
+    Assert-WorkflowStep `
+        -Steps $macOSSteps `
+        -JobName $macOSJobName `
+        -Name 'Test native POSIX containment on Darwin' `
+        -Shell 'pwsh' `
+        -Run './scripts/test-scan-private-markers.ps1 -RequireMacOSNativePosixContainment'
+    Assert-WorkflowStep `
+        -Steps $macOSSteps `
+        -JobName $macOSJobName `
+        -Name 'Scan for private markers' `
+        -Shell 'pwsh' `
+        -Run './scripts/scan-private-markers.ps1'
+    Assert-WorkflowStep `
+        -Steps $macOSSteps `
+        -JobName $macOSJobName `
+        -Name 'Check whitespace' `
+        -Shell 'pwsh' `
+        -Run 'git diff-tree -r --check 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD'
+
     # workflow内の全 third-party action は tag/branchではなく40桁SHAだけを
     # 許可する。job shapeがuses数も固定するため、追加actionも同時に拒否する。
     $workflowSource = Get-RepoUtf8Text -RelativePath $RelativePath
@@ -918,9 +1004,9 @@ function Assert-WorkflowContract {
             )
         }
     )
-    if ($usesLines.Count -ne 2 -or
+    if ($usesLines.Count -ne 3 -or
         $pinnedUsesLines.Count -ne $usesLines.Count) {
-        Add-Failure 'Workflow must contain exactly two third-party action uses, each pinned to a full 40-character SHA.'
+        Add-Failure 'Workflow must contain exactly three third-party action uses, each pinned to a full 40-character SHA.'
     }
 }
 
@@ -1046,6 +1132,27 @@ function Test-WorkflowContractMutationGuards {
             Source = $source.Replace(
                 '    runs-on: windows-latest',
                 '    runs-on: windows-2022'
+            )
+        },
+        [pscustomobject]@{
+            Name = 'macos-job-key-drift'
+            Source = $source.Replace(
+                '  validate-macos:',
+                '  validate-darwin:'
+            )
+        },
+        [pscustomobject]@{
+            Name = 'macos-runner-drift'
+            Source = $source.Replace(
+                '    runs-on: macos-15',
+                '    runs-on: macos-14'
+            )
+        },
+        [pscustomobject]@{
+            Name = 'macos-native-containment-proof-removed'
+            Source = $source.Replace(
+                './scripts/test-scan-private-markers.ps1 -RequireMacOSNativePosixContainment',
+                './scripts/test-scan-private-markers.ps1'
             )
         },
         [pscustomobject]@{
@@ -1311,6 +1418,12 @@ Assert-FileContains -RelativePath 'SECURITY.md' -Pattern '(?im)private vulnerabi
 Assert-FileContains -RelativePath 'scripts/scan-private-markers.ps1' -Pattern 'private-marker-process\.ps1' -Description 'shared bounded process boundary in scanner'
 Assert-FileContains -RelativePath 'scripts/test-scan-private-markers.ps1' -Pattern 'private-marker-process\.ps1' -Description 'shared bounded process boundary in scanner self-test'
 Assert-FileContains -RelativePath 'scripts/test-scan-private-markers.ps1' -Pattern 'PosixSignal.*IsSuccessfulResult' -Description 'POSIX cleanup result regression coverage'
+Assert-FileContains -RelativePath 'scripts/test-scan-private-markers.ps1' -Pattern 'RequireMacOSNativePosixContainment' -Description 'Darwin native-containment canary switch'
+Assert-FileContains -RelativePath 'scripts/test-scan-private-markers.ps1' -Pattern '\$posixPipeResult\.PosixSessionGate' -Description 'observed POSIX gate assertion'
+Assert-FileContains -RelativePath 'scripts/test-scan-private-markers.ps1' -Pattern '\$Result\.ExitCode -eq 0' -Description 'target success required for POSIX evidence'
+Assert-FileContains -RelativePath 'scripts/test-scan-private-markers.ps1' -Pattern 'Test-PrivateMarkerPosixContainmentEvidence' -Description 'central POSIX evidence predicate'
+Assert-FileContains -RelativePath 'scripts/test-scan-private-markers.ps1' -Pattern 'ExpectedExitCode = 23' -Description 'synthetic nonzero POSIX evidence rejection'
+Assert-FileContains -RelativePath 'scripts/test-scan-private-markers.ps1' -Pattern 'POSIX containment evidence: platform=Darwin;' -Description 'structured Darwin containment evidence'
 Assert-FileContains -RelativePath 'scripts/scan-private-markers.ps1' -Pattern 'CODEX_WINDOWS_SANDBOX_TROUBLESHOOTING_PRIVATE_MARKERS' -Description '036 local marker environment contract'
 Assert-FileContains -RelativePath 'scripts/scan-private-markers.ps1' -Pattern 'h8nc4y/codex-windows-sandbox-troubleshooting' -Description '036 repository URL allowlist'
 Assert-FileContains -RelativePath 'scripts/scan-private-markers.ps1' -Pattern 'openai/codex' -Description 'upstream Codex URL allowlist'
@@ -1340,6 +1453,7 @@ Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern 
 Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern '(?s)\$clock = \[System\.Diagnostics\.Stopwatch\]::StartNew\(\).*?\$containedProcess = \[PrivateMarker\.ContainedProcess\]::Start\(' -Description 'timeout clock before Windows launch'
 Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern '(?s)\$clock = \[System\.Diagnostics\.Stopwatch\]::StartNew\(\).*?\$processStarted = \$process\.Start\(\)' -Description 'timeout clock before POSIX launch'
 Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern '\$clock\.ElapsedMilliseconds -lt \$TimeoutMilliseconds;' -Description 'POSIX gate deadline ownership'
+Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern 'PosixSessionGate = \$posixSessionGate' -Description 'reported POSIX gate selection'
 Assert-FileMatchCount -RelativePath 'scripts/private-marker-process.ps1' -Pattern 'if \(\$clock\.ElapsedMilliseconds -ge \$TimeoutMilliseconds\)' -ExpectedCount 2 -Description 'initial and post-cleanup elapsed-only deadline rejection'
 Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern 'TestOnlyPostExitDelayMilliseconds' -Description 'deterministic post-exit deadline regression seam'
 Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern 'TestOnlyExpireDeadlineAfterInitialCheck' -Description 'post-stream cleanup deadline regression seam'

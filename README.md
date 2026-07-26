@@ -299,8 +299,24 @@ The GitHub Actions workflow runs the same validation, scan self-test,
 private-marker scan, and whitespace check on pull requests and pushes to
 `main`. Windows runs the self-test separately under PowerShell 7 and
 Windows PowerShell 5.1; Ubuntu 24.04 runs the PowerShell 7 self-test for
-the POSIX process boundary. Both jobs have a ten-minute timeout and use an
-immutable checkout action revision.
+the external-`setsid` and forced-native POSIX process boundaries. macOS 15
+requires a Darwin runtime canary, forces the native `setsid(2)` fallback,
+and prints structured evidence only after the target exits zero and
+descendant cleanup succeeds. All three jobs have a ten-minute timeout and
+use an immutable checkout action revision.
+
+The macOS-only evidence command is:
+
+```powershell
+pwsh -NoProfile -File ./scripts/test-scan-private-markers.ps1 -RequireMacOSNativePosixContainment
+```
+
+It fails outside Darwin and fails if the process boundary does not report
+the forced native gate, the target exits nonzero, or cleanup is incomplete.
+A final
+`POSIX containment evidence: platform=Darwin; ...` line therefore records
+the exercised gate rather than treating a generic successful exit as
+macOS containment evidence.
 
 The scanner, its process helper, its self-test, and the readiness validator
 contain Japanese comments and are also executed by Windows PowerShell 5.1.

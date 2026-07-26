@@ -1,6 +1,10 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$Path = ''
+    [string]$Path = '',
+
+    # macOS CI専用。Darwin runtimeと強制native setsid(2)経路を実測し、
+    # genericなself-test成功だけをmacOS containment証跡にしない。
+    [switch]$RequireMacOSNativePosixContainment
 )
 
 Set-StrictMode -Version Latest
@@ -44,10 +48,37 @@ if (-not (Test-Path -LiteralPath $currentPowerShellExecutable -PathType Leaf)) {
 }
 
 $failures = New-Object System.Collections.Generic.List[string]
+$posixGateEvidence = @{}
+$macOSRuntimeCanaryPassed = $false
+$macOSNativeContainmentVerified = $false
 
 function Add-Failure {
     param([string]$Message)
     $failures.Add($Message) | Out-Null
+}
+
+function Test-PrivateMarkerPosixContainmentEvidence {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Result,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedSessionGate,
+
+        [bool]$DescendantStarted
+    )
+
+    # evidence判定を1か所へ固定し、gate/tree成功だけでtarget失敗を
+    # macOS成功へ昇格させない。
+    return [string]$Result.PosixSessionGate -ceq $ExpectedSessionGate -and
+        $Result.PipeLeakDetected -and
+        -not $Result.StreamsCompleted -and
+        $Result.TreeStopped -and
+        -not $Result.TimedOut -and
+        -not $Result.OutputLimitExceeded -and
+        -not $Result.InputWriteFailed -and
+        $DescendantStarted -and
+        $Result.ExitCode -eq 0
 }
 
 function Test-PrivateMarkerCommandIsDeferredDefinition {
@@ -3226,13 +3257,86 @@ $stream.Flush()
         Add-Failure 'Expected hostile nonexistent scan paths to emit exactly one fixed stderr code plus the platform newline.'
     }
 
+    # OS非依存の合成resultでも、同じcontainment shapeのexit 23だけを
+    # evidence predicateが拒否することをPS7/PS5.1の両方で固定する。
+    $syntheticPosixEvidenceResult = [pscustomobject]@{
+        PosixSessionGate = 'native-setsid'
+        PipeLeakDetected = $true
+        StreamsCompleted = $false
+        TreeStopped = $true
+        TimedOut = $false
+        OutputLimitExceeded = $false
+        InputWriteFailed = $false
+        ExitCode = 0
+    }
+    $syntheticPosixNonzeroResult = [pscustomobject]@{
+        PosixSessionGate = 'native-setsid'
+        PipeLeakDetected = $true
+        StreamsCompleted = $false
+        TreeStopped = $true
+        TimedOut = $false
+        OutputLimitExceeded = $false
+        InputWriteFailed = $false
+        ExitCode = 23
+    }
+    if (-not (Test-PrivateMarkerPosixContainmentEvidence `
+            -Result $syntheticPosixEvidenceResult `
+            -ExpectedSessionGate 'native-setsid' `
+            -DescendantStarted $true) -or
+        (Test-PrivateMarkerPosixContainmentEvidence `
+            -Result $syntheticPosixNonzeroResult `
+            -ExpectedSessionGate 'native-setsid' `
+            -DescendantStarted $true)) {
+        Add-Failure 'Expected POSIX evidence to require target exit zero.'
+    }
+
     if (-not (Test-PrivateMarkerWindowsHost)) {
         # direct parentが終了済みでも、同じprocess groupの孫をsignalして
         # inherited pipeと遅延sentinelの両方を確実に閉じる。
+        if ($RequireMacOSNativePosixContainment) {
+            $macOSRuntimeCanaryPassed =
+                [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+                    [System.Runtime.InteropServices.OSPlatform]::OSX
+                )
+            if (-not $macOSRuntimeCanaryPassed) {
+                Add-Failure 'Expected -RequireMacOSNativePosixContainment to run on Darwin.'
+            }
+        }
+        $availableSetSidPath = @('/usr/bin/setsid', '/bin/setsid') |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+            Select-Object -First 1
         $posixSurvivedSentinels =
             New-Object System.Collections.Generic.List[string]
-        foreach ($forceNativeGate in @($false, $true)) {
-            $gateLabel = if ($forceNativeGate) { 'native' } else { 'setsid' }
+        $posixContainmentCases = @(
+            [pscustomobject]@{
+                Label = 'auto'
+                ForceNativeGate = $false
+                ExpectedExitCode = 0
+                MustProduceEvidence = $true
+            },
+            [pscustomobject]@{
+                Label = 'forced-native'
+                ForceNativeGate = $true
+                ExpectedExitCode = 0
+                MustProduceEvidence = $true
+            },
+            [pscustomobject]@{
+                Label = 'forced-native-nonzero'
+                ForceNativeGate = $true
+                ExpectedExitCode = 23
+                MustProduceEvidence = $false
+            }
+        )
+        foreach ($posixContainmentCase in $posixContainmentCases) {
+            $gateLabel = [string]$posixContainmentCase.Label
+            $forceNativeGate =
+                [bool]$posixContainmentCase.ForceNativeGate
+            $expectedSessionGate = if ($forceNativeGate -or
+                [string]::IsNullOrWhiteSpace($availableSetSidPath)) {
+                'native-setsid'
+            } else {
+                'external-setsid'
+            }
             $startedSentinel =
                 Join-Path $tempRoot "posix-$gateLabel-started.txt"
             $survivedSentinel =
@@ -3294,6 +3398,7 @@ try {
 finally {
     $child.Dispose()
 }
+exit __EXIT_CODE__
 '@
             $posixParentScript = $posixParentTemplate.Replace(
                 '__HOST__',
@@ -3304,6 +3409,9 @@ finally {
             ).Replace(
                 '__STARTED__',
                 $escapedStartedSentinel
+            ).Replace(
+                '__EXIT_CODE__',
+                [string]$posixContainmentCase.ExpectedExitCode
             )
             $posixParentEncoded = [Convert]::ToBase64String(
                 [System.Text.Encoding]::Unicode.GetBytes($posixParentScript)
@@ -3323,24 +3431,64 @@ finally {
                 -StreamCompletionWaitMilliseconds 250 `
                 -StreamCleanupWaitMilliseconds 2000 `
                 -ForceNativePosixSessionGate:$forceNativeGate
-            if (-not $posixPipeResult.PipeLeakDetected -or
-                $posixPipeResult.StreamsCompleted -or
-                -not $posixPipeResult.TreeStopped -or
-                $posixPipeResult.TimedOut -or
-                $posixPipeResult.OutputLimitExceeded -or
-                $posixPipeResult.InputWriteFailed) {
+            $actualSessionGate = [string]$posixPipeResult.PosixSessionGate
+            $sessionGateMatches =
+                $actualSessionGate -ceq $expectedSessionGate
+            if (-not $sessionGateMatches) {
+                Add-Failure "Expected POSIX $gateLabel containment gate '$expectedSessionGate'; observed '$actualSessionGate'."
+            }
+            $containmentShapePassed =
+                $posixPipeResult.PipeLeakDetected -and
+                -not $posixPipeResult.StreamsCompleted -and
+                $posixPipeResult.TreeStopped -and
+                -not $posixPipeResult.TimedOut -and
+                -not $posixPipeResult.OutputLimitExceeded -and
+                -not $posixPipeResult.InputWriteFailed
+            if (-not $containmentShapePassed) {
                 Add-Failure "Expected POSIX $gateLabel containment to detect the child-held pipe and stop the process group."
             }
-            if (-not (Test-Path -LiteralPath $startedSentinel -PathType Leaf)) {
+            $descendantStarted =
+                Test-Path -LiteralPath $startedSentinel -PathType Leaf
+            if (-not $descendantStarted) {
                 Add-Failure "Expected POSIX $gateLabel containment fixture to prove that its descendant started."
+            }
+            $exitCodeMatches =
+                $posixPipeResult.ExitCode -eq
+                [int]$posixContainmentCase.ExpectedExitCode
+            if (-not $exitCodeMatches) {
+                Add-Failure "Expected POSIX $gateLabel target exit code $($posixContainmentCase.ExpectedExitCode); observed $($posixPipeResult.ExitCode)."
+            }
+            # macOS evidenceはcontainment shapeだけでなくtarget成功も必須。
+            # 同じshapeでexit 23を返すfixtureがfalse-greenを直接拒否する。
+            $eligibleForContainmentEvidence =
+                Test-PrivateMarkerPosixContainmentEvidence `
+                    -Result $posixPipeResult `
+                    -ExpectedSessionGate $expectedSessionGate `
+                    -DescendantStarted $descendantStarted
+            if ($posixContainmentCase.MustProduceEvidence) {
+                if ($eligibleForContainmentEvidence) {
+                    $posixGateEvidence[$gateLabel] = $actualSessionGate
+                } else {
+                    Add-Failure "Expected POSIX $gateLabel containment with target exit 0 to produce evidence."
+                }
+            } elseif ($eligibleForContainmentEvidence) {
+                Add-Failure 'Expected the synthetic nonzero POSIX target to be rejected as containment evidence.'
             }
         }
         Start-Sleep -Milliseconds 1750
+        $posixDescendantsStopped = $true
         foreach ($survivedSentinel in $posixSurvivedSentinels) {
             if (Test-Path -LiteralPath $survivedSentinel) {
+                $posixDescendantsStopped = $false
                 Add-Failure 'Expected POSIX process-group cleanup to stop every delayed descendant sentinel.'
                 break
             }
+        }
+        if ($RequireMacOSNativePosixContainment -and
+            $macOSRuntimeCanaryPassed -and
+            $posixDescendantsStopped -and
+            $posixGateEvidence['forced-native'] -ceq 'native-setsid') {
+            $macOSNativeContainmentVerified = $true
         }
 
         # kill(2)の戻り値-1は同じでも、ESRCHだけを「既に停止済み」と
@@ -6151,6 +6299,11 @@ finally {
     }
 }
 
+if ($RequireMacOSNativePosixContainment -and
+    -not $macOSNativeContainmentVerified) {
+    Add-Failure 'Expected Darwin forced-native POSIX containment and descendant cleanup evidence.'
+}
+
 if ($failures.Count -gt 0) {
     Write-Host 'Private marker scan self-test failed:'
     foreach ($failure in $failures) {
@@ -6159,5 +6312,14 @@ if ($failures.Count -gt 0) {
     exit 1
 }
 
+if ($RequireMacOSNativePosixContainment) {
+    Write-Host (
+        'POSIX containment evidence: platform=Darwin; auto-gate=' +
+        $posixGateEvidence['auto'] +
+        '; forced-gate=' +
+        $posixGateEvidence['forced-native'] +
+        '; descendant-cleanup=passed.'
+    )
+}
 Write-Host 'Private marker scan self-test passed.'
 exit 0

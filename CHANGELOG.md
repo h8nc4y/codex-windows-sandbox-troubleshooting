@@ -65,6 +65,12 @@ The format loosely follows Keep a Changelog conventions.
 
 ### Changed
 
+- Added a bounded `macos-15` validation job that requires a Darwin runtime,
+  exercises the forced native `setsid(2)` process-containment fallback,
+  requires target exit zero, verifies descendant cleanup, rejects a
+  synthetic nonzero target, and emits an explicit gate-evidence line. The
+  exact runner, timeout, command, and workflow shape are protected by the
+  readiness validator and mutation fixtures.
 - Expanded validation to a bounded Windows job covering PowerShell 7 and
   Windows PowerShell 5.1 plus a bounded Ubuntu 24.04 job, pinned checkout
   to an immutable revision, and made the readiness validator own the exact
