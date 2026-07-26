@@ -313,10 +313,17 @@ pwsh -NoProfile -File ./scripts/test-scan-private-markers.ps1 -RequireMacOSNativ
 
 It fails outside Darwin and fails if the process boundary does not report
 the forced native gate, the target exits nonzero, or cleanup is incomplete.
-A final
-`POSIX containment evidence: platform=Darwin; ...` line therefore records
-the exercised gate rather than treating a generic successful exit as
-macOS containment evidence.
+A final `POSIX containment evidence: platform=Darwin; ...;
+nonzero-rejection=passed; descendant-cleanup=passed.` line therefore records
+the exercised gate and the rejected nonzero fixture rather than treating a
+generic successful exit as macOS containment evidence.
+
+The native wrapper resolves `setsid` / `kill` through
+`libSystem.B.dylib` on macOS and `libc` on other POSIX hosts. Startup
+failures use a bounded, fixed-code status channel that distinguishes native
+library, entry-point, `setsid` errno, and ready-file failures. Unknown
+status content is reported only as `unknown`; target output and paths are
+not reflected into the diagnostic.
 
 The scanner, its process helper, its self-test, and the readiness validator
 contain Japanese comments and are also executed by Windows PowerShell 5.1.

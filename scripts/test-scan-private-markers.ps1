@@ -51,6 +51,7 @@ $failures = New-Object System.Collections.Generic.List[string]
 $posixGateEvidence = @{}
 $macOSRuntimeCanaryPassed = $false
 $macOSNativeContainmentVerified = $false
+$posixNonzeroEvidenceRejected = $false
 
 function Add-Failure {
     param([string]$Message)
@@ -3290,6 +3291,102 @@ $stream.Flush()
         Add-Failure 'Expected POSIX evidence to require target exit zero.'
     }
 
+    # child statusは固定allowlistだけを親例外へ変換し、任意文字列やpathを
+    # CI logへ反射しない。errnoも有限桁のdecimalだけを許可する。
+    $posixGateFailureReasonCases = @(
+        [pscustomobject]@{
+            Status = 'native-library'
+            Expected = 'native-library'
+        },
+        [pscustomobject]@{
+            Status = 'native-entrypoint'
+            Expected = 'native-entrypoint'
+        },
+        [pscustomobject]@{
+            Status = 'setsid-error-1'
+            Expected = 'setsid-error-1'
+        },
+        [pscustomobject]@{
+            Status = 'ready-write'
+            Expected = 'ready-write'
+        },
+        [pscustomobject]@{
+            Status = 'setsid-error-123456'
+            Expected = 'unknown'
+        },
+        [pscustomobject]@{
+            Status = 'synthetic-sensitive-value'
+            Expected = 'unknown'
+        }
+    )
+    foreach ($reasonCase in $posixGateFailureReasonCases) {
+        $actualReason = ConvertTo-PrivateMarkerPosixGateFailureReason `
+            -Status $reasonCase.Status
+        if ($actualReason -cne $reasonCase.Expected) {
+            Add-Failure "Expected fixed POSIX gate failure reason '$($reasonCase.Expected)'; observed '$actualReason'."
+        }
+    }
+
+    $posixStatusReadFixture =
+        Join-Path $tempRoot 'synthetic-posix-gate-status'
+    $posixStatusReadCases = @(
+        [pscustomobject]@{
+            Label = 'known'
+            Bytes = [Text.Encoding]::UTF8.GetBytes('native-library')
+            ExpectedText = 'native-library'
+            ExpectedReason = 'native-library'
+        },
+        [pscustomobject]@{
+            Label = '64-byte-boundary'
+            Bytes = [Text.Encoding]::UTF8.GetBytes(('x' * 64))
+            ExpectedText = 'x' * 64
+            ExpectedReason = 'unknown'
+        },
+        [pscustomobject]@{
+            Label = '65-byte-rejection'
+            Bytes = [Text.Encoding]::UTF8.GetBytes(('x' * 65))
+            ExpectedText = ''
+            ExpectedReason = 'unknown'
+        },
+        [pscustomobject]@{
+            Label = 'invalid-utf8'
+            Bytes = [byte[]]@(0xC3, 0x28)
+            ExpectedText = ''
+            ExpectedReason = 'unknown'
+        },
+        [pscustomobject]@{
+            Label = 'synthetic-sensitive-content'
+            Bytes = [Text.Encoding]::UTF8.GetBytes(
+                '<local-path>/synthetic-sensitive-value'
+            )
+            ExpectedText = '<local-path>/synthetic-sensitive-value'
+            ExpectedReason = 'unknown'
+        }
+    )
+    foreach ($statusReadCase in $posixStatusReadCases) {
+        try {
+            [IO.File]::WriteAllBytes(
+                $posixStatusReadFixture,
+                [byte[]]$statusReadCase.Bytes
+            )
+            $actualStatusText =
+                Read-PrivateMarkerPosixGateStatus `
+                    -Path $posixStatusReadFixture
+            $actualStatusReason =
+                ConvertTo-PrivateMarkerPosixGateFailureReason `
+                    -Status $actualStatusText
+            if ($actualStatusText -cne $statusReadCase.ExpectedText -or
+                $actualStatusReason -cne $statusReadCase.ExpectedReason) {
+                Add-Failure "Expected bounded POSIX status case '$($statusReadCase.Label)' to produce only its fixed result."
+            }
+        }
+        finally {
+            if ([IO.File]::Exists($posixStatusReadFixture)) {
+                [IO.File]::Delete($posixStatusReadFixture)
+            }
+        }
+    }
+
     if (-not (Test-PrivateMarkerWindowsHost)) {
         # direct parentが終了済みでも、同じprocess groupの孫をsignalして
         # inherited pipeと遅延sentinelの両方を確実に閉じる。
@@ -3473,6 +3570,12 @@ exit __EXIT_CODE__
                 }
             } elseif ($eligibleForContainmentEvidence) {
                 Add-Failure 'Expected the synthetic nonzero POSIX target to be rejected as containment evidence.'
+            } elseif ($sessionGateMatches -and
+                $containmentShapePassed -and
+                $descendantStarted -and
+                $exitCodeMatches) {
+                # 非ゼロfixture自身の前提も満たした場合だけ、拒否の実測証跡へ昇格する。
+                $posixNonzeroEvidenceRejected = $true
             }
         }
         Start-Sleep -Milliseconds 1750
@@ -3487,6 +3590,7 @@ exit __EXIT_CODE__
         if ($RequireMacOSNativePosixContainment -and
             $macOSRuntimeCanaryPassed -and
             $posixDescendantsStopped -and
+            $posixNonzeroEvidenceRejected -and
             $posixGateEvidence['forced-native'] -ceq 'native-setsid') {
             $macOSNativeContainmentVerified = $true
         }
@@ -6318,6 +6422,7 @@ if ($RequireMacOSNativePosixContainment) {
         $posixGateEvidence['auto'] +
         '; forced-gate=' +
         $posixGateEvidence['forced-native'] +
+        '; nonzero-rejection=passed' +
         '; descendant-cleanup=passed.'
     )
 }
