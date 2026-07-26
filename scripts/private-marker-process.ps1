@@ -1054,6 +1054,24 @@ function ConvertTo-PrivateMarkerPosixGateFailureReason {
     }
 }
 
+function Resolve-PrivateMarkerPosixGateFailureReason {
+    param(
+        [AllowEmptyString()][string]$Status,
+        [bool]$DeadlineReached,
+        [bool]$ChildHasExited
+    )
+
+    # statusがあれば既知codeだけを採用する。空statusの実timeoutだけは、
+    # deadline到達かつchild生存のclosed条件でfixed timeoutへ分類する。
+    if (-not [string]::IsNullOrEmpty($Status)) {
+        return ConvertTo-PrivateMarkerPosixGateFailureReason -Status $Status
+    }
+    if ($DeadlineReached -and -not $ChildHasExited) {
+        return 'timeout'
+    }
+    return 'unknown'
+}
+
 function Read-PrivateMarkerPosixGateStatus {
     param([AllowEmptyString()][string]$Path)
 
@@ -1829,8 +1847,13 @@ catch {
                         Read-PrivateMarkerPosixGateStatus `
                             -Path $posixGateStatusPath
                     $posixGateFailureReason =
-                        ConvertTo-PrivateMarkerPosixGateFailureReason `
-                            -Status $posixGateStatus
+                        Resolve-PrivateMarkerPosixGateFailureReason `
+                            -Status $posixGateStatus `
+                            -DeadlineReached (
+                                $clock.ElapsedMilliseconds -ge
+                                    $TimeoutMilliseconds
+                            ) `
+                            -ChildHasExited $process.HasExited
                     [void](Stop-PrivateMarkerProcessTree -Process $process)
                     throw (
                         'Failed to establish the bounded POSIX session gate ' +

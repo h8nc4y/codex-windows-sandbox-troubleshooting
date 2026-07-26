@@ -322,7 +322,9 @@ The native wrapper resolves `setsid` / `kill` through
 `libSystem.B.dylib` on macOS and `libc` on other POSIX hosts. Startup
 failures use a bounded, fixed-code status channel that distinguishes native
 library, entry-point, type-definition, platform-detection, native-invocation,
-`setsid` errno, and ready-file failures. The child closes a staging file
+`setsid` errno, and ready-file failures. Separately, the parent infers a fixed
+gate `timeout` only when status is empty, the total deadline was reached, and
+the child is still running. The child closes a staging file
 before atomically publishing the final status path, so the parent never
 accepts a partially written diagnostic. Unknown status content is reported
 only as `unknown`; target output and paths are not reflected into the
@@ -340,6 +342,9 @@ definition hash, phase assignments, fault seams, and direct native calls use
 ordinal comparisons. Mutations hidden behind false control flow, nested
 functions/scriptblocks, sliced cleanup collections, direct final writes,
 altered phase names, or textual comments and here-strings therefore fail.
+The Darwin evidence fixture keeps its cold child startup and `Add-Type`
+compilation bounded by a 30-second test-only total deadline; production
+timeouts are unchanged.
 
 The scanner, its process helper, its self-test, and the readiness validator
 contain Japanese comments and are also executed by Windows PowerShell 5.1.

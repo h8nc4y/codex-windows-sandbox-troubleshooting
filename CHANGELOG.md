@@ -90,6 +90,9 @@ The format loosely follows Keep a Changelog conventions.
   definition. Ordinal phase/source checks reject false control-flow wrappers,
   sliced cleanup collections, nested substitutions, direct final writes,
   zero-width names, block comments, and textual decoys.
+- Classified a native gate that reaches its total deadline before publishing
+  status as fixed `timeout`, and gave the macOS-only evidence fixture a
+  bounded 30-second cold-start budget without changing production defaults.
 - Avoided the read-only PowerShell 7 `$IsMacOS` automatic variable when
   selecting the native session library.
 - Expanded validation to a bounded Windows job covering PowerShell 7 and

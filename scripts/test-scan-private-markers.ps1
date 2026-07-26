@@ -3339,6 +3339,48 @@ $stream.Flush()
         }
     }
 
+    # status無しの実timeoutだけをtimeoutにし、早期exitとmalformed statusは
+    # unknownへ畳むclosed classificationをtable-drivenで固定する。
+    foreach ($resolutionCase in @(
+        [pscustomobject]@{
+            Label = 'live-child-deadline'
+            Status = ''
+            DeadlineReached = $true
+            ChildHasExited = $false
+            Expected = 'timeout'
+        },
+        [pscustomobject]@{
+            Label = 'early-exit-no-status'
+            Status = ''
+            DeadlineReached = $false
+            ChildHasExited = $true
+            Expected = 'unknown'
+        },
+        [pscustomobject]@{
+            Label = 'deadline-after-early-exit'
+            Status = ''
+            DeadlineReached = $true
+            ChildHasExited = $true
+            Expected = 'unknown'
+        },
+        [pscustomobject]@{
+            Label = 'malformed-status'
+            Status = 'synthetic-malformed-status'
+            DeadlineReached = $true
+            ChildHasExited = $false
+            Expected = 'unknown'
+        }
+    )) {
+        $resolvedReason =
+            Resolve-PrivateMarkerPosixGateFailureReason `
+                -Status $resolutionCase.Status `
+                -DeadlineReached $resolutionCase.DeadlineReached `
+                -ChildHasExited $resolutionCase.ChildHasExited
+        if ($resolvedReason -cne $resolutionCase.Expected) {
+            Add-Failure "Expected POSIX gate resolution '$($resolutionCase.Label)' to remain '$($resolutionCase.Expected)'."
+        }
+    }
+
     $posixStatusReadFixture =
         Join-Path $tempRoot 'synthetic-posix-gate-status'
     $posixStatusReadCases = @(
@@ -3400,6 +3442,10 @@ $stream.Flush()
     }
 
     if (-not (Test-PrivateMarkerWindowsHost)) {
+        # hosted macOSのcold pwsh/Add-Typeもbounded total timeout内で測る。
+        # production既定値は変えず、Darwin証跡fixtureだけ30秒上限にする。
+        $nativeGateTestTimeoutMilliseconds =
+            if ($RequireMacOSNativePosixContainment) { 30000 } else { 10000 }
         # native wrapperはPowerShell 7のread-only `$IsMacOS` と
         # case-insensitiveに衝突する名前へ代入してはならない。
         $nativeWrapperSource = [IO.File]::ReadAllText($processBoundary)
@@ -3440,7 +3486,7 @@ $stream.Flush()
                         -Arguments @('-NoProfile', '-Command', 'exit 0') `
                         -WorkingDirectory $tempRoot `
                         -IsolationRoot $nativeGateFailureIsolation `
-                        -TimeoutMilliseconds 10000 `
+                        -TimeoutMilliseconds $nativeGateTestTimeoutMilliseconds `
                         -ForceNativePosixSessionGate `
                         -TestOnlyNativePosixGateFailurePhase (
                             $nativeGateFailurePhase
@@ -3473,6 +3519,43 @@ $stream.Flush()
             if ($nativeGateFailureResidue.Count -ne 0) {
                 Add-Failure "Expected native POSIX gate phase '$nativeGateFailurePhase' to remove final and staging status files."
             }
+        }
+
+        # 1ms total deadlineでchildがreadyを公開する前に必ず停止させ、
+        # fixed timeout分類とlate-ready/final/staging cleanupを実processで測る。
+        $nativeGateDeadlineIsolation =
+            Join-Path $tempRoot 'native-gate-deadline'
+        $observedNativeGateDeadlineFailure = ''
+        try {
+            [void](Invoke-PrivateMarkerProcess `
+                    -FileName $currentPowerShellExecutable `
+                    -Arguments @('-NoProfile', '-Command', 'exit 0') `
+                    -WorkingDirectory $tempRoot `
+                    -IsolationRoot $nativeGateDeadlineIsolation `
+                    -TimeoutMilliseconds 1 `
+                    -ForceNativePosixSessionGate)
+            Add-Failure 'Expected native POSIX gate deadline to fail closed.'
+        }
+        catch {
+            $observedNativeGateDeadlineFailure = $_.Exception.Message
+        }
+        if ($observedNativeGateDeadlineFailure -cne
+            'Failed to establish the bounded POSIX session gate (timeout).') {
+            Add-Failure 'Expected a live native POSIX gate deadline to report only fixed timeout.'
+        }
+        $nativeGateDeadlineResidue = @()
+        if (Test-Path -LiteralPath $nativeGateDeadlineIsolation) {
+            $nativeGateDeadlineResidue = @(
+                Get-ChildItem `
+                    -LiteralPath $nativeGateDeadlineIsolation `
+                    -Force |
+                    Where-Object {
+                        $_.Name -like 'private-marker-posix-*'
+                    }
+            )
+        }
+        if ($nativeGateDeadlineResidue.Count -ne 0) {
+            Add-Failure 'Expected native POSIX gate deadline cleanup to remove late-ready/final/staging files.'
         }
 
         # direct parentが終了済みでも、同じprocess groupの孫をsignalして
@@ -3611,7 +3694,7 @@ exit __EXIT_CODE__
                 -IsolationRoot (
                     Join-Path $tempRoot "posix-$gateLabel-isolation"
                 ) `
-                -TimeoutMilliseconds 10000 `
+                -TimeoutMilliseconds $nativeGateTestTimeoutMilliseconds `
                 -StreamCompletionWaitMilliseconds 250 `
                 -StreamCleanupWaitMilliseconds 2000 `
                 -ForceNativePosixSessionGate:$forceNativeGate
