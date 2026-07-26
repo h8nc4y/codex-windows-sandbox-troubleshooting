@@ -1588,11 +1588,14 @@ namespace PrivateMarker
 }
 "@
     }
-    $isMacOS =
+    # PowerShell 7 の read-only automatic variable `$IsMacOS` と
+    # case-insensitive に衝突しない固有名を使う。
+    $nativeGateIsMacOS =
         [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
             [Runtime.InteropServices.OSPlatform]::OSX
         )
-    $sessionResult = [PrivateMarker.NativePosixSession]::Create($isMacOS)
+    $sessionResult =
+        [PrivateMarker.NativePosixSession]::Create($nativeGateIsMacOS)
     if ($sessionResult -lt 0) {
         $nativeError =
             [Runtime.InteropServices.Marshal]::GetLastWin32Error()

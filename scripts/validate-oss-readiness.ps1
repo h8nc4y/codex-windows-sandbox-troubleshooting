@@ -1461,6 +1461,7 @@ Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern 
 Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern 'UTF8Encoding\(\$false, \$true\)' -Description 'strict POSIX status UTF-8 decode'
 Assert-FileDoesNotContain -RelativePath 'scripts/private-marker-process.ps1' -Pattern '(?s)ReadAllText\(\s*\$posixGateStatusPath' -Description 'unbounded POSIX gate status read'
 Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern 'libSystem\.B\.dylib' -Description 'macOS native session library'
+Assert-FileDoesNotContain -RelativePath 'scripts/private-marker-process.ps1' -Pattern '(?im)^\s*\$isMacOS\s*=' -Description 'read-only PowerShell IsMacOS automatic variable collision'
 Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern '(?s)NativePosixSession.*?Marshal\]::GetLastWin32Error' -Description 'native setsid errno capture'
 Assert-FileContains -RelativePath 'scripts/private-marker-process.ps1' -Pattern 'private-marker-posix-status-' -Description 'bounded POSIX gate status channel'
 Assert-FileMatchCount -RelativePath 'scripts/private-marker-process.ps1' -Pattern 'if \(\$clock\.ElapsedMilliseconds -ge \$TimeoutMilliseconds\)' -ExpectedCount 2 -Description 'initial and post-cleanup elapsed-only deadline rejection'

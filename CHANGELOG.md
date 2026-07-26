@@ -75,6 +75,8 @@ The format loosely follows Keep a Changelog conventions.
   signaling while retaining `libc` on Linux, and added a bounded fixed-code
   gate-status channel that diagnoses native library, entry-point, errno,
   and ready-file failures without reflecting target output or paths.
+- Avoided the read-only PowerShell 7 `$IsMacOS` automatic variable when
+  selecting the native session library.
 - Expanded validation to a bounded Windows job covering PowerShell 7 and
   Windows PowerShell 5.1 plus a bounded Ubuntu 24.04 job, pinned checkout
   to an immutable revision, and made the readiness validator own the exact

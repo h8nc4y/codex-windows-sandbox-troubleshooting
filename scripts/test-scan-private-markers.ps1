@@ -3388,6 +3388,13 @@ $stream.Flush()
     }
 
     if (-not (Test-PrivateMarkerWindowsHost)) {
+        # native wrapperはPowerShell 7のread-only `$IsMacOS` と
+        # case-insensitiveに衝突する名前へ代入してはならない。
+        $nativeWrapperSource = [IO.File]::ReadAllText($processBoundary)
+        if ($nativeWrapperSource -cmatch '(?im)^\s*\$isMacOS\s*=') {
+            Add-Failure 'Expected the native POSIX wrapper to avoid the read-only IsMacOS automatic variable.'
+        }
+
         # direct parentが終了済みでも、同じprocess groupの孫をsignalして
         # inherited pipeと遅延sentinelの両方を確実に閉じる。
         if ($RequireMacOSNativePosixContainment) {
