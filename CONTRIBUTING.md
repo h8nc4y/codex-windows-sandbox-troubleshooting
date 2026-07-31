@@ -93,6 +93,20 @@ pwsh -NoProfile -File ./scripts/test-scan-private-markers.ps1
 pwsh -NoProfile -File ./scripts/scan-private-markers.ps1
 ```
 
+On macOS, also run the Darwin canary and forced native process-containment
+evidence path:
+
+```bash
+pwsh -NoProfile -File ./scripts/test-scan-private-markers.ps1 -RequireMacOSNativePosixContainment
+```
+
+The command must print the structured Darwin/native-gate evidence line
+before its normal pass line. The evidence requires target exit zero and
+successful descendant cleanup; the self-test also checks that an otherwise
+equivalent nonzero target is rejected. Ubuntu and Windows must continue to
+use the commands above so their external-`setsid`, forced-native, Job
+Object, and Windows PowerShell 5.1 coverage remain intact.
+
 ## Pull Request Expectations
 
 - Explain the problem and the chosen fix.

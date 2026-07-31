@@ -993,8 +993,11 @@ namespace PrivateMarker
         private const int SigKill = 9;
         private const int ErrorNoSuchProcess = 3;
 
-        [DllImport("libc", SetLastError = true)]
-        private static extern int kill(int pid, int signal);
+        [DllImport("libc", EntryPoint = "kill", SetLastError = true)]
+        private static extern int KillUnix(int pid, int signal);
+
+        [DllImport("libSystem.B.dylib", EntryPoint = "kill", SetLastError = true)]
+        private static extern int KillMacOS(int pid, int signal);
 
         public static bool IsSuccessfulResult(int result, int error)
         {
@@ -1009,7 +1012,9 @@ namespace PrivateMarker
                 return false;
             }
 
-            var result = kill(-processGroupId, SigKill);
+            var result = RuntimeInformation.IsOSPlatform(OSPlatform.OSX)
+                ? KillMacOS(-processGroupId, SigKill)
+                : KillUnix(-processGroupId, SigKill);
             var error = result == 0 ? 0 : Marshal.GetLastWin32Error();
             return IsSuccessfulResult(result, error);
         }
@@ -1027,6 +1032,97 @@ function Test-PrivateMarkerWindowsHost {
     catch {
         # RuntimeInformation が無い旧hostでも、ambient変数ではなくruntime特性を使う。
         return [System.IO.Path]::DirectorySeparatorChar -eq [char]92
+    }
+}
+
+function ConvertTo-PrivateMarkerPosixGateFailureReason {
+    param([AllowEmptyString()][string]$Status)
+
+    # childからの任意文字列を例外へ反射しない。既知codeと有限桁errnoだけを
+    # 固定diagnosticへ変換し、pathやtarget stderrは公開しない。
+    if ($Status -cmatch '^setsid-error-(?<errno>[0-9]{1,5})$') {
+        return "setsid-error-$($Matches['errno'])"
+    }
+    switch -CaseSensitive ($Status) {
+        'native-library' { return 'native-library' }
+        'native-entrypoint' { return 'native-entrypoint' }
+        'native-type-definition' { return 'native-type-definition' }
+        'native-platform-detection' { return 'native-platform-detection' }
+        'native-invocation' { return 'native-invocation' }
+        'ready-write' { return 'ready-write' }
+        default { return 'unknown' }
+    }
+}
+
+function Resolve-PrivateMarkerPosixGateFailureReason {
+    param(
+        [AllowEmptyString()][string]$Status,
+        [bool]$DeadlineReached,
+        [bool]$ChildHasExited
+    )
+
+    # statusがあれば既知codeだけを採用する。空statusの実timeoutだけは、
+    # deadline到達かつchild生存のclosed条件でfixed timeoutへ分類する。
+    if (-not [string]::IsNullOrEmpty($Status)) {
+        return ConvertTo-PrivateMarkerPosixGateFailureReason -Status $Status
+    }
+    if ($DeadlineReached -and -not $ChildHasExited) {
+        return 'timeout'
+    }
+    return 'unknown'
+}
+
+function Read-PrivateMarkerPosixGateStatus {
+    param([AllowEmptyString()][string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return ''
+    }
+
+    $statusStream = $null
+    try {
+        # length確認と別readを分けず、開いた同一handleから最大65 bytesだけ取る。
+        # 65 bytes目が存在する、strict UTF-8でない、またはI/O失敗ならunknownへ畳む。
+        $statusStream = [System.IO.File]::Open(
+            $Path,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read,
+            (
+                [System.IO.FileShare]::ReadWrite -bor
+                [System.IO.FileShare]::Delete
+            )
+        )
+        $statusBytes = New-Object byte[] 65
+        $statusLength = 0
+        while ($statusLength -lt $statusBytes.Length) {
+            $readLength = $statusStream.Read(
+                $statusBytes,
+                $statusLength,
+                $statusBytes.Length - $statusLength
+            )
+            if ($readLength -eq 0) {
+                break
+            }
+            $statusLength += $readLength
+        }
+        if ($statusLength -eq 0 -or $statusLength -gt 64) {
+            return ''
+        }
+        $strictUtf8 =
+            New-Object System.Text.UTF8Encoding($false, $true)
+        return $strictUtf8.GetString(
+            $statusBytes,
+            0,
+            $statusLength
+        )
+    }
+    catch {
+        return ''
+    }
+    finally {
+        if ($null -ne $statusStream) {
+            $statusStream.Dispose()
+        }
     }
 }
 
@@ -1336,6 +1432,16 @@ function Invoke-PrivateMarkerProcess {
         # 強制し、portable fallbackも同じcontainment契約で検証する。
         [switch]$ForceNativePosixSessionGate,
 
+        # Self-test 専用。native wrapper内の固定phaseで合成失敗させ、
+        # status公開、親診断、final/staging cleanupを実processで検証する。
+        [ValidateSet(
+            '',
+            'type-definition',
+            'platform-detection',
+            'native-invocation'
+        )]
+        [string]$TestOnlyNativePosixGateFailurePhase = '',
+
         # Self-test 専用。Job 割当前または resume 前の合成失敗でも、
         # suspended child を有限時間で確実に回収する契約を実測する。
         [ValidateSet('', 'assign', 'resume', 'close')]
@@ -1349,6 +1455,13 @@ function Invoke-PrivateMarkerProcess {
         $StandardInputBytes.Length -gt $MaximumStandardInputBytes) {
         throw 'Standard input exceeds the bounded process byte limit.'
     }
+    if (-not [string]::IsNullOrEmpty(
+            $TestOnlyNativePosixGateFailurePhase
+        ) -and
+        ((Test-PrivateMarkerWindowsHost) -or
+            -not $ForceNativePosixSessionGate)) {
+        throw 'Synthetic native POSIX gate failure requires the forced native gate.'
+    }
 
     $process = $null
     $containedProcess = $null
@@ -1356,6 +1469,9 @@ function Invoke-PrivateMarkerProcess {
     $posixProcessGroupId = 0
     $posixGateReadyPath = $null
     $posixGateReleasePath = $null
+    $posixGateStatusPath = $null
+    $posixGateStatusStagingPath = $null
+    $posixSessionGate = 'not-applicable'
     $stdinStream = $null
     $stdoutStream = $null
     $stderrStream = $null
@@ -1430,11 +1546,13 @@ function Invoke-PrivateMarkerProcess {
                 -not [string]::IsNullOrWhiteSpace($setsidPath)) {
                 # setsid自身がtargetをexecする前にsession/process groupを作る。
                 # targetは親がgroup IDを記録する前に走れても境界外へは出られない。
+                $posixSessionGate = 'external-setsid'
                 $effectiveFileName = $setsidPath
                 $effectiveArguments = @('--', $FileName) + @($Arguments)
             } else {
                 # macOS等でsetsid executableが無い場合は、同じpwsh child内で
                 # setsid(2)を先に実行し、親がgroup IDを記録するまでtargetを止める。
+                $posixSessionGate = 'native-setsid'
                 $useNativePosixSessionGate = $true
                 $gateRoot = if ([string]::IsNullOrWhiteSpace($IsolationRoot)) {
                     [System.IO.Path]::GetTempPath()
@@ -1450,6 +1568,10 @@ function Invoke-PrivateMarkerProcess {
                     Join-Path $gateRoot "private-marker-posix-ready-$gateId"
                 $posixGateReleasePath =
                     Join-Path $gateRoot "private-marker-posix-release-$gateId"
+                $posixGateStatusPath =
+                    Join-Path $gateRoot "private-marker-posix-status-$gateId"
+                $posixGateStatusStagingPath =
+                    "$posixGateStatusPath.partial"
                 $payloadJson = [pscustomobject]@{
                     FileName = $FileName
                     Arguments = @($Arguments)
@@ -1463,30 +1585,100 @@ function Invoke-PrivateMarkerProcess {
                 $releasePathBase64 = [Convert]::ToBase64String(
                     [System.Text.Encoding]::UTF8.GetBytes($posixGateReleasePath)
                 )
+                $statusPathBase64 = [Convert]::ToBase64String(
+                    [System.Text.Encoding]::UTF8.GetBytes($posixGateStatusPath)
+                )
+                $statusStagingPathBase64 = [Convert]::ToBase64String(
+                    [System.Text.Encoding]::UTF8.GetBytes(
+                        $posixGateStatusStagingPath
+                    )
+                )
+                $testOnlyFailurePhaseBase64 = [Convert]::ToBase64String(
+                    [System.Text.Encoding]::UTF8.GetBytes(
+                        $TestOnlyNativePosixGateFailurePhase
+                    )
+                )
                 $posixWrapperTemplate = @'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-if ($null -eq ('PrivateMarker.NativePosixSession' -as [type])) {
-    Add-Type -TypeDefinition @"
+$statusPath = [Text.Encoding]::UTF8.GetString(
+    [Convert]::FromBase64String('__STATUS_PATH__')
+)
+$statusStagingPath = [Text.Encoding]::UTF8.GetString(
+    [Convert]::FromBase64String('__STATUS_STAGING_PATH__')
+)
+$testOnlyNativeGateFailurePhase = [Text.Encoding]::UTF8.GetString(
+    [Convert]::FromBase64String('__TEST_ONLY_FAILURE_PHASE__')
+)
+function Write-NativeGateStatus([string]$Status) {
+    try {
+        # 最終pathを作ってから内容を書くと、親が空または途中のfileを読む。
+        # 同一directoryのstaging fileをcloseしてからrenameし、公開をatomicにする。
+        [IO.File]::WriteAllText(
+            $statusStagingPath,
+            $Status,
+            [Text.UTF8Encoding]::new($false)
+        )
+        [IO.File]::Move($statusStagingPath, $statusPath)
+    }
+    catch {
+        # status channel自体の失敗は親側のfixed unknownへ畳み込む。
+        try {
+            if ([IO.File]::Exists($statusStagingPath)) {
+                [IO.File]::Delete($statusStagingPath)
+            }
+        }
+        catch {
+        }
+    }
+}
+$nativeGatePhase = 'type-definition'
+try {
+    if ($testOnlyNativeGateFailurePhase -ceq $nativeGatePhase) {
+        throw 'Synthetic native POSIX gate phase failure.'
+    }
+    if ($null -eq ('PrivateMarker.NativePosixSession' -as [type])) {
+        Add-Type -TypeDefinition @"
 using System.Runtime.InteropServices;
 
 namespace PrivateMarker
 {
     public static class NativePosixSession
     {
-        [DllImport("libc", SetLastError = true)]
-        private static extern int setsid();
+        [DllImport("libc", EntryPoint = "setsid", SetLastError = true)]
+        private static extern int CreateUnix();
 
-        public static int Create()
+        [DllImport("libSystem.B.dylib", EntryPoint = "setsid", SetLastError = true)]
+        private static extern int CreateMacOS();
+
+        public static int Create(bool isMacOS)
         {
-            return setsid();
+            return isMacOS ? CreateMacOS() : CreateUnix();
         }
     }
 }
 "@
-}
-try {
-    if ([PrivateMarker.NativePosixSession]::Create() -lt 0) {
+    }
+    $nativeGatePhase = 'platform-detection'
+    if ($testOnlyNativeGateFailurePhase -ceq $nativeGatePhase) {
+        throw 'Synthetic native POSIX gate phase failure.'
+    }
+    # PowerShell 7 の read-only automatic variable `$IsMacOS` と
+    # case-insensitive に衝突しない固有名を使う。
+    $nativeGateIsMacOS =
+        [Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+            [Runtime.InteropServices.OSPlatform]::OSX
+        )
+    $nativeGatePhase = 'native-invocation'
+    if ($testOnlyNativeGateFailurePhase -ceq $nativeGatePhase) {
+        throw 'Synthetic native POSIX gate phase failure.'
+    }
+    $sessionResult =
+        [PrivateMarker.NativePosixSession]::Create($nativeGateIsMacOS)
+    if ($sessionResult -lt 0) {
+        $nativeError =
+            [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        Write-NativeGateStatus "setsid-error-$nativeError"
         [Console]::Error.WriteLine('Bounded POSIX session setup failed.')
         exit 126
     }
@@ -1496,11 +1688,17 @@ try {
     $releasePath = [Text.Encoding]::UTF8.GetString(
         [Convert]::FromBase64String('__RELEASE_PATH__')
     )
-    [IO.File]::WriteAllText(
-        $readyPath,
-        'ready',
-        [Text.UTF8Encoding]::new($false)
-    )
+    try {
+        [IO.File]::WriteAllText(
+            $readyPath,
+            'ready',
+            [Text.UTF8Encoding]::new($false)
+        )
+    }
+    catch {
+        Write-NativeGateStatus 'ready-write'
+        exit 126
+    }
     $released = $false
     for ($gateAttempt = 0; $gateAttempt -lt 3000; $gateAttempt++) {
         if ([IO.File]::Exists($releasePath)) {
@@ -1525,6 +1723,27 @@ try {
     exit [int]$childExitCode
 }
 catch {
+    $baseException = $_.Exception.GetBaseException()
+    if ($baseException -is [System.DllNotFoundException]) {
+        Write-NativeGateStatus 'native-library'
+    } elseif ($baseException -is [System.EntryPointNotFoundException]) {
+        Write-NativeGateStatus 'native-entrypoint'
+    } else {
+        switch -CaseSensitive ($nativeGatePhase) {
+            'type-definition' {
+                Write-NativeGateStatus 'native-type-definition'
+            }
+            'platform-detection' {
+                Write-NativeGateStatus 'native-platform-detection'
+            }
+            'native-invocation' {
+                Write-NativeGateStatus 'native-invocation'
+            }
+            default {
+                Write-NativeGateStatus 'unknown'
+            }
+        }
+    }
     [Console]::Error.WriteLine('Bounded child launch failed.')
     exit 127
 }
@@ -1535,6 +1754,15 @@ catch {
                 ).Replace(
                     '__RELEASE_PATH__',
                     $releasePathBase64
+                ).Replace(
+                    '__STATUS_PATH__',
+                    $statusPathBase64
+                ).Replace(
+                    '__STATUS_STAGING_PATH__',
+                    $statusStagingPathBase64
+                ).Replace(
+                    '__TEST_ONLY_FAILURE_PHASE__',
+                    $testOnlyFailurePhaseBase64
                 ).Replace(
                     '__PAYLOAD__',
                     $payloadBase64
@@ -1598,6 +1826,9 @@ catch {
                         $posixGateReady = $true
                         break
                     }
+                    if ([System.IO.File]::Exists($posixGateStatusPath)) {
+                        break
+                    }
                     if ($process.HasExited) {
                         break
                     }
@@ -1612,8 +1843,22 @@ catch {
                     Start-Sleep -Milliseconds $gateWaitMilliseconds
                 }
                 if (-not $posixGateReady) {
+                    $posixGateStatus =
+                        Read-PrivateMarkerPosixGateStatus `
+                            -Path $posixGateStatusPath
+                    $posixGateFailureReason =
+                        Resolve-PrivateMarkerPosixGateFailureReason `
+                            -Status $posixGateStatus `
+                            -DeadlineReached (
+                                $clock.ElapsedMilliseconds -ge
+                                    $TimeoutMilliseconds
+                            ) `
+                            -ChildHasExited $process.HasExited
                     [void](Stop-PrivateMarkerProcessTree -Process $process)
-                    throw 'Failed to establish the bounded POSIX session gate.'
+                    throw (
+                        'Failed to establish the bounded POSIX session gate ' +
+                        "($posixGateFailureReason)."
+                    )
                 }
                 # readyはsetsid成功後だけ作られる。group IDを保持してから
                 # releaseするため、targetの最初の命令より先にcleanup先が確定する。
@@ -1901,7 +2146,9 @@ catch {
         }
         foreach ($gatePath in @(
             $posixGateReadyPath,
-            $posixGateReleasePath
+            $posixGateReleasePath,
+            $posixGateStatusPath,
+            $posixGateStatusStagingPath
         )) {
             if (-not [string]::IsNullOrWhiteSpace($gatePath)) {
                 try {
@@ -1935,6 +2182,7 @@ catch {
         PipeLeakDetected = $pipeLeakDetected
         StreamsCompleted = $streamsCompleted
         TreeStopped = $treeStopped
+        PosixSessionGate = $posixSessionGate
     }
 }
 

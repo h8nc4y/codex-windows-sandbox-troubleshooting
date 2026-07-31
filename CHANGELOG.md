@@ -65,6 +65,40 @@ The format loosely follows Keep a Changelog conventions.
 
 ### Changed
 
+- Added a bounded `macos-15` validation job that requires a Darwin runtime,
+  exercises the forced native `setsid(2)` process-containment fallback,
+  requires target exit zero, verifies descendant cleanup, rejects a
+  synthetic nonzero target, and emits an explicit gate-evidence line. The
+  exact runner, timeout, command, and workflow shape are protected by the
+  readiness validator and mutation fixtures.
+- Selected `libSystem.B.dylib` for macOS native `setsid` / process-group
+  signaling while retaining `libc` on Linux, and added a bounded fixed-code
+  gate-status channel that diagnoses native library, entry-point, errno,
+  and ready-file failures without reflecting target output or paths.
+- Published native-gate status atomically from a closed staging file and
+  added fixed phase codes for type definition, platform detection, and
+  native invocation so a macOS startup failure cannot be hidden by a
+  partial status read or arbitrary exception text. POSIX self-tests now
+  fault each phase in a real child, require the corresponding fixed parent
+  reason, and reject final/staging residue. The readiness validator uses the
+  full-source Parser AST to bind the wrapper assignment and cleanup loop to
+  the same exact try/else execution path, then parses the embedded wrapper.
+  It closes the six base64 source assignments and Replace chain, final
+  cleanup collection/body, wrapper top-level sequence, status-function
+  blocks/catch-all handlers/parameter/body, direct Exists/Delete condition,
+  filesystem-call allowlist, and hashed Add-Type
+  definition. Ordinal phase/source checks reject false control-flow wrappers,
+  sliced cleanup collections, nested substitutions, direct final writes,
+  zero-width names, block comments, and textual decoys.
+- Classified a native gate that reaches its total deadline before publishing
+  status as fixed `timeout`, and gave the macOS-only evidence fixture a
+  bounded 30-second budget for every normal process call. Native-gate hosts
+  skip only the 25-millisecond post-exit seam and five-second post-cleanup seam
+  that cold startup would preempt; the dedicated one-millisecond native
+  deadline still proves fixed timeout and residue-free cleanup. Windows,
+  Ubuntu, and production defaults are unchanged.
+- Avoided the read-only PowerShell 7 `$IsMacOS` automatic variable when
+  selecting the native session library.
 - Expanded validation to a bounded Windows job covering PowerShell 7 and
   Windows PowerShell 5.1 plus a bounded Ubuntu 24.04 job, pinned checkout
   to an immutable revision, and made the readiness validator own the exact

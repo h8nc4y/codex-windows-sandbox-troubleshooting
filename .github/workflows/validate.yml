@@ -68,3 +68,27 @@ jobs:
       - name: Check whitespace
         shell: pwsh
         run: git diff-tree -r --check 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD
+
+  validate-macos:
+    name: Validate native macOS process containment
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Validate OSS readiness
+        shell: pwsh
+        run: ./scripts/validate-oss-readiness.ps1
+
+      - name: Test native POSIX containment on Darwin
+        shell: pwsh
+        run: ./scripts/test-scan-private-markers.ps1 -RequireMacOSNativePosixContainment
+
+      - name: Scan for private markers
+        shell: pwsh
+        run: ./scripts/scan-private-markers.ps1
+
+      - name: Check whitespace
+        shell: pwsh
+        run: git diff-tree -r --check 4b825dc642cb6eb9a060e54bf8d69288fbee4904 HEAD
